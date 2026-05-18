@@ -9,20 +9,19 @@ import os
 import re
 import sys
 import threading
-import traceback
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib.parse import urlparse
-
 import aiohttp
 import asyncpg
 from dotenv import load_dotenv
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
-# 1. SERVIDOR DE SAÚDE (RENDER WEB SERVICE)
+# =====================================================================
+# 1. SERVIDOR WEB (Obrigatório para Render Web Service)
+# =====================================================================
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"OK")
+        self.wfile.write(b"Bot Sniper Omega: Ativo")
     def log_message(self, format, *args): return
 
 def start_web_server():
@@ -30,9 +29,11 @@ def start_web_server():
     server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
     server.serve_forever()
 
+# =====================================================================
 # 2. LOGS
+# =====================================================================
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-7s | %(message)s")
-log = logging.getLogger("Sniper_V22_4")
+log = logging.getLogger("Sniper_V23")
 
 class AliExpressSniperBot:
     def __init__(self):
@@ -49,63 +50,79 @@ class AliExpressSniperBot:
         self.pool = None
         self.session = None
 
+    # =====================================================================
+    # 3. PARSER MANUAL (Ignora o bug de IPv6 do Python 3.14)
+    # =====================================================================
     async def setup_db(self):
-        log.info("🐘 Conectando ao banco de dados...")
-        if not self.db_url:
-            raise ValueError("DATABASE_URL não configurada!")
-
-        # Correção automática de prefixo para asyncpg
-        url = self.db_url.replace("postgres://", "postgresql://", 1)
-        p = urlparse(url)
-
+        log.info("🐘 Iniciando conexão manual com o banco...")
         try:
+            # Desmontagem manual da string para evitar urllib.parse
+            # Ex: postgresql://user:pass@host:port/dbname
+            url = self.db_url.replace("postgresql://", "").replace("postgres://", "")
+            
+            auth, rest = url.split("@")
+            user, password = auth.split(":")
+            
+            host_port, dbname = rest.split("/")
+            if ":" in host_port:
+                host, port = host_port.split(":")
+            else:
+                host, port = host_port, 5432
+
             self.pool = await asyncpg.create_pool(
-                user=p.username,
-                password=p.password,
-                host=p.hostname,
-                port=p.port or 5432,
-                database=p.path.lstrip('/'),
+                user=user,
+                password=password,
+                host=host,
+                port=int(port),
+                database=dbname,
                 ssl="require"
             )
+            
             async with self.pool.acquire() as conn:
                 await conn.execute('''
                     CREATE TABLE IF NOT EXISTS historico (id TEXT PRIMARY KEY, preco FLOAT, ts BIGINT);
                     CREATE TABLE IF NOT EXISTS postados (id TEXT PRIMARY KEY, ts BIGINT);
                 ''')
-            log.info("🐘 Banco de dados pronto!")
+            log.info("🐘 Conectado ao Supabase com sucesso (Manual Bypass)!")
         except Exception as e:
-            log.error(f"❌ Erro no setup_db: {e}")
-            raise
+            log.error(f"❌ Erro ao processar DATABASE_URL: {e}")
+            sys.exit(1)
 
-    async def fetch_ali(self, termo):
-        ts = str(int(time.time() * 1000))
-        params = {
-            "app_key": self.ali_key, "method": "aliexpress.affiliate.product.query",
-            "timestamp": ts, "format": "json", "v": "2.0", "sign_method": "md5",
-            "keywords": termo, "page_size": "40", "target_currency": "BRL",
-            "target_language": "PT", "tracking_id": self.ali_tracking, "ship_to_country": "BR"
-        }
-        # Assinatura
-        data = "".join(f"{k}{v}" for k, v in sorted(params.items()) if v is not None)
-        params["sign"] = hashlib.md5((self.ali_secret + data + self.ali_secret).encode("utf-8")).hexdigest().upper()
-        
-        try:
-            async with self.session.get(self.ali_api, params=params, timeout=15) as r:
-                res = await r.json()
-                return res.get("aliexpress_affiliate_product_query_response", {}).get("resp_result", {}).get("result", {}).get("products", {}).get("product", [])
-        except: return []
+    # =====================================================================
+    # 4. FUNÇÕES DE BUSCA E POSTAGEM
+    # =====================================================================
+    def sign_ali(self, p):
+        data = "".join(f"{k}{v}" for k, v in sorted(p.items()) if v is not None)
+        return hashlib.md5((self.ali_secret + data + self.ali_secret).encode("utf-8")).hexdigest().upper()
 
     async def run(self):
         await self.setup_db()
         self.session = aiohttp.ClientSession()
-        log.info("🚀 BOT ONLINE!")
+        log.info("🚀 SNIPER v23 ONLINE!")
         
-        marcas = ["Xiaomi", "Samsung", "iPhone", "Nintendo", "SSD", "Anker", "Baseus"]
+        marcas = ["Xiaomi", "Poco", "Nintendo", "Anker", "Baseus", "Ugreen", "Ryzen", "SSD"]
+        
         while True:
             try:
+                # Mostra o radar
+                async with self.pool.acquire() as conn:
+                    h = await conn.fetchval("SELECT COUNT(*) FROM historico")
+                    log.info(f"📊 Radar: {h} itens monitorados.")
+
                 for m in marcas:
-                    prods = await self.fetch_ali(m)
-                    if prods:
+                    params = {
+                        "app_key": self.ali_key, "method": "aliexpress.affiliate.product.query",
+                        "timestamp": str(int(time.time() * 1000)), "format": "json", "v": "2.0",
+                        "sign_method": "md5", "keywords": m, "page_size": "50",
+                        "target_currency": "BRL", "target_language": "PT",
+                        "tracking_id": self.ali_tracking, "ship_to_country": "BR"
+                    }
+                    params["sign"] = self.sign_ali(params)
+                    
+                    async with self.session.get(self.ali_api, params=params) as r:
+                        res = await r.json()
+                        prods = res.get("aliexpress_affiliate_product_query_response", {}).get("resp_result", {}).get("result", {}).get("products", {}).get("product", [])
+                        
                         for p in prods:
                             pid = str(p['product_id'])
                             preco = float(p.get("target_sale_price") or p.get("sale_price") or 0)
@@ -114,27 +131,31 @@ class AliExpressSniperBot:
                             async with self.pool.acquire() as conn:
                                 row = await conn.fetchrow("SELECT preco FROM historico WHERE id = $1", pid)
                                 if row:
-                                    if preco < row['preco'] * 0.90: # 10% queda
-                                        # (Lógica de postagem simplificada para teste)
-                                        log.info(f"Oportunidade detectada: {pid}")
-                                    await conn.execute("UPDATE historico SET preco=$1 WHERE id=$2", preco, pid)
+                                    # Se o preço cair mais de 10%
+                                    if preco <= (row['preco'] * 0.90):
+                                        ja_postado = await conn.fetchval("SELECT 1 FROM postados WHERE id = $1", pid)
+                                        if not ja_postado:
+                                            # Enviar Telegram
+                                            msg = f"🚨 <b>QUEDA DE PREÇO!</b>\n\n📦 <b>{html.escape(p['product_title'][:60])}</b>\n\n💰 <b>R$ {preco:,.2f}</b>\n📉 Base: R$ {row['preco']:,.2f}\n\n🛒 <a href='{p['promotion_link']}'>COMPRAR AGORA</a>"
+                                            await self.session.post(f"{self.tg_api}/sendPhoto", json={"chat_id": self.chat_id, "photo": p['product_main_image_url'], "caption": msg, "parse_mode": "HTML"})
+                                            await conn.execute("INSERT INTO postados (id, ts) VALUES ($1, $2)", pid, int(time.time()))
+                                    
+                                    if preco < row['preco']:
+                                        await conn.execute("UPDATE historico SET preco=$1 WHERE id=$2", preco, pid)
                                 else:
                                     await conn.execute("INSERT INTO historico (id, preco, ts) VALUES ($1, $2, $3)", pid, preco, int(time.time()))
                 
-                await asyncio.sleep(60)
+                await asyncio.sleep(40)
             except Exception as e:
                 log.error(f"Erro no loop: {e}")
-                await asyncio.sleep(30)
+                await asyncio.sleep(20)
 
 if __name__ == "__main__":
-    # 1. Inicia Web Server para o Render
+    # Inicia o servidor web para o Render não dar erro de porta
     threading.Thread(target=start_web_server, daemon=True).start()
     
-    # 2. Inicia o Bot com captura de erro total
     bot = AliExpressSniperBot()
     try:
         asyncio.run(bot.run())
-    except Exception:
-        print("🔴 CRASH FATAL NO BOT:")
-        traceback.print_exc()
-        sys.exit(1)
+    except KeyboardInterrupt:
+        pass
