@@ -47,7 +47,7 @@ class OffersBot:
             
         self.db.save_price_if_changed(product_id, current_price_float)
 
-        # 3. Inteligência de Média de Preços
+        # 3. Inteligência de Média de Preços (Dispara posts em quedas de valor)
         avg_price, min_price = self.db.get_price_metrics(product_id)
         discount_msg = ""
         
@@ -60,13 +60,13 @@ class OffersBot:
             else:
                 return False
         else:
-            logger.info(f"Novo item adicionado ao radar de preços: {product_id}")
-            discount_msg = "🌟 *Novo Radar de Hardware!* Monitorando variações de preço a partir de agora."
+            logger.info(f"Monitorando item no radar de preços: {product_id}")
+            discount_msg = "🌟 *Radar de Hardware Ativo!* Acompanhando variações de preço deste produto."
 
-        # 4. Geração do Link de Afiliado
+        # 4. Geração do Link de Afiliado (Método 100% estável e autorizado)
         affiliate_url = self.ali_client.generate_affiliate_link(original_url)
 
-        # 5. Montagem do Template
+        # 5. Montagem do Template do Canal
         message_text = f"""🛠️ *{title}*
 
 💰 Preço Agora: *{price_str}*
@@ -106,14 +106,14 @@ def run_mock_server():
 
 async def main():
     bot = OffersBot()
-    logger.info("Bot de Ofertas Inteligente (API Oficial) ativado no Render!")
+    logger.info("Bot de Ofertas Inteligente (Estável) ativado no Render!")
     
     while True:
         try:
-            logger.info("Iniciando ciclo automático de busca via API AliExpress...")
+            logger.info("Iniciando ciclo automático de verificação de radar...")
             
-            # Busca a lista de produtos baseada nas palavras-chave rotativas
-            lista_produtos = bot.ali_client.fetch_hot_products()
+            # Puxa a lista mapeada de alta conversão
+            lista_produtos = bot.ali_client.get_monitored_products()
             
             for prod in lista_produtos:
                 await bot.post_new_offer(
@@ -125,7 +125,7 @@ async def main():
                 )
                 await asyncio.sleep(2)
             
-            logger.info("Varredura de lista concluída. Aguardando 5 minutos para o próximo ciclo...")
+            logger.info("Varredura concluída com sucesso. Aguardando 5 minutos para o próximo ciclo...")
             await asyncio.sleep(300)
             
         except Exception as e:
