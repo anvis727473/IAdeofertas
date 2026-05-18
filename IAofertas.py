@@ -58,8 +58,7 @@ class AliExpressSniperBot:
         self.session = None
 
     # =====================================================================
-    # 3. BANCO DE DADOS
-    # Usa original_price como referência real — imune a produtos já baratos
+    # 3. BANCO DE DADOS COM MIGRAÇÃO AUTOMÁTICA
     # =====================================================================
     async def setup_db(self):
         log.info("🐘 Conectando ao Banco de Dados...")
@@ -69,12 +68,13 @@ class AliExpressSniperBot:
                 min_size=1, max_size=5, command_timeout=60
             )
             async with self.pool.acquire() as conn:
+                # Cria tabelas se não existirem
                 await conn.execute('''
                     CREATE TABLE IF NOT EXISTS historico (
-                        id              TEXT PRIMARY KEY,
-                        preco_original  FLOAT,
-                        menor_preco     FLOAT,
-                        ts              BIGINT
+                        id             TEXT PRIMARY KEY,
+                        preco_original FLOAT,
+                        menor_preco    FLOAT,
+                        ts             BIGINT
                     );
                     CREATE TABLE IF NOT EXISTS postados (
                         id   TEXT PRIMARY KEY,
@@ -82,6 +82,39 @@ class AliExpressSniperBot:
                         ts   BIGINT
                     );
                 ''')
+
+                # Migração: colunas novas na tabela historico
+                for coluna, tipo_col in [("preco_original", "FLOAT"), ("menor_preco", "FLOAT")]:
+                    existe = await conn.fetchval(f"""
+                        SELECT column_name FROM information_schema.columns
+                        WHERE table_name='historico' AND column_name='{coluna}'
+                    """)
+                    if not existe:
+                        await conn.execute(f"ALTER TABLE historico ADD COLUMN {coluna} {tipo_col}")
+                        log.info(f"🔧 Coluna '{coluna}' adicionada em historico")
+
+                # Migração: coluna 'tipo' na tabela postados
+                existe_tipo = await conn.fetchval("""
+                    SELECT column_name FROM information_schema.columns
+                    WHERE table_name='postados' AND column_name='tipo'
+                """)
+                if not existe_tipo:
+                    await conn.execute("ALTER TABLE postados ADD COLUMN tipo TEXT")
+                    log.info("🔧 Coluna 'tipo' adicionada em postados")
+
+                # Migração: copia dados da coluna 'preco' antiga se existir
+                existe_preco = await conn.fetchval("""
+                    SELECT column_name FROM information_schema.columns
+                    WHERE table_name='historico' AND column_name='preco'
+                """)
+                if existe_preco:
+                    await conn.execute("""
+                        UPDATE historico
+                        SET preco_original = preco, menor_preco = preco
+                        WHERE preco_original IS NULL
+                    """)
+                    log.info("🔧 Dados migrados de 'preco' → 'preco_original' e 'menor_preco'")
+
             log.info("✅ BANCO CONECTADO!")
         except Exception as e:
             log.error(f"❌ ERRO DE CONEXÃO: {e}")
@@ -98,10 +131,6 @@ class AliExpressSniperBot:
     # 5. EXTRAÇÃO DE PREÇOS E TIPO DE OFERTA
     # =====================================================================
     def analisar_oferta(self, p):
-        """
-        Retorna dict com todos os preços e tipo de oferta detectado.
-        Tipos: 'desconto', 'cupom', 'moedas', 'combo'
-        """
         def to_float(v):
             try:
                 return float(str(v or 0).replace(",", "."))
@@ -110,21 +139,21 @@ class AliExpressSniperBot:
 
         preco_original = to_float(p.get("original_price"))
         preco_venda    = to_float(p.get("target_sale_price") or p.get("sale_price"))
-        preco_app      = to_float(p.get("app_sale_price"))          # preço exclusivo do app
-        valor_cupom    = to_float(p.get("target_app_sale_price"))   # às vezes indica desconto extra
-        moedas         = to_float(p.get("sale_price_discount_info", {}).get("discount_price") if isinstance(p.get("sale_price_discount_info"), dict) else 0)
+        preco_app      = to_float(p.get("app_sale_price"))
+        valor_cupom    = to_float(p.get("target_app_sale_price"))
+        moedas         = to_float(
+            p.get("sale_price_discount_info", {}).get("discount_price")
+            if isinstance(p.get("sale_price_discount_info"), dict) else 0
+        )
 
-        # Melhor preço real disponível
         precos_validos = [x for x in [preco_venda, preco_app] if x > 0]
         melhor_preco   = min(precos_validos) if precos_validos else 0
 
         if melhor_preco < 5 or preco_original < 5:
             return None
 
-        # Desconto base em relação ao preço ORIGINAL (não ao histórico)
         desconto_pct = ((preco_original - melhor_preco) / preco_original * 100) if preco_original > 0 else 0
 
-        # Detecta tipos de oferta
         tem_cupom  = valor_cupom > 0 and valor_cupom < melhor_preco
         tem_moedas = moedas > 0
         tem_app    = preco_app > 0 and preco_app < preco_venda
@@ -153,14 +182,13 @@ class AliExpressSniperBot:
     # 6. MONTAGEM DA MENSAGEM POR TIPO
     # =====================================================================
     def montar_mensagem(self, p, oferta):
-        titulo  = html.escape(str(p.get("product_title", ""))[:70])
-        link    = p.get("promotion_link", "")
-        orig    = oferta["preco_original"]
-        melhor  = oferta["melhor_preco"]
-        pct     = oferta["desconto_pct"]
-        tipo    = oferta["tipo"]
+        titulo = html.escape(str(p.get("product_title", ""))[:70])
+        link   = p.get("promotion_link", "")
+        orig   = oferta["preco_original"]
+        melhor = oferta["melhor_preco"]
+        pct    = oferta["desconto_pct"]
+        tipo   = oferta["tipo"]
 
-        # Cabeçalho por tipo
         if tipo == "combo":
             cabecalho = f"🔥 <b>COMBO INSANO! CUPOM + MOEDAS ({pct:.0f}% OFF)</b>"
         elif tipo == "cupom":
@@ -177,7 +205,6 @@ class AliExpressSniperBot:
             f"🏷️ Preço normal: <strike>R$ {orig:,.2f}</strike>\n"
         )
 
-        # Extras por tipo
         if tipo in ("cupom", "combo"):
             msg += f"🎟️ <i>Aplique o cupom disponível na página do produto</i>\n"
         if tipo in ("moedas", "combo"):
@@ -225,34 +252,30 @@ class AliExpressSniperBot:
 
         melhor_preco   = oferta["melhor_preco"]
         preco_original = oferta["preco_original"]
-        desconto_pct   = oferta["desconto_pct"]
         tipo           = oferta["tipo"]
 
         try:
             async with self.pool.acquire() as conn:
-                row = await conn.fetchrow("SELECT preco_original, menor_preco FROM historico WHERE id = $1", pid)
+                row = await conn.fetchrow(
+                    "SELECT preco_original, menor_preco FROM historico WHERE id = $1", pid
+                )
 
                 if row:
-                    # Usa o maior original_price já visto como referência confiável
-                    ref_original = max(row["preco_original"], preco_original)
-                    ref_menor    = row["menor_preco"]
+                    ref_original = max(row["preco_original"] or 0, preco_original)
+                    ref_menor    = row["menor_preco"] or melhor_preco
 
-                    # Recalcula desconto com referência confiável
                     desconto_real = ((ref_original - melhor_preco) / ref_original * 100) if ref_original > 0 else 0
 
-                    # Posta se:
-                    # 1. Desconto >= 15% em relação ao preço original
-                    # 2. OU é menor que o menor preço histórico por >= 5%
-                    # 3. OU tem cupom/moedas com >= 10% off
                     deve_postar = (
                         desconto_real >= 15 or
-                        (melhor_preco <= ref_menor * 0.95) or
+                        melhor_preco <= ref_menor * 0.95 or
                         (tipo in ("cupom", "moedas", "combo") and desconto_real >= 10)
                     )
 
                     if deve_postar:
-                        # Verifica se já postou este tipo hoje (86400s = 1 dia)
-                        row_post = await conn.fetchrow("SELECT tipo, ts FROM postados WHERE id = $1", pid)
+                        row_post = await conn.fetchrow(
+                            "SELECT tipo, ts FROM postados WHERE id = $1", pid
+                        )
                         ja_postado_hoje = (
                             row_post and
                             row_post["tipo"] == tipo and
@@ -260,14 +283,13 @@ class AliExpressSniperBot:
                         )
 
                         if not ja_postado_hoje:
-                            oferta["desconto_pct"] = desconto_real  # usa desconto real
+                            oferta["desconto_pct"] = desconto_real
                             await self.enviar_oferta(p, oferta)
                             await conn.execute(
                                 "INSERT INTO postados (id, tipo, ts) VALUES ($1, $2, $3) ON CONFLICT (id) DO UPDATE SET tipo=$2, ts=$3",
                                 pid, tipo, int(time.time())
                             )
 
-                    # Atualiza histórico
                     novo_menor = min(ref_menor, melhor_preco)
                     await conn.execute(
                         "UPDATE historico SET preco_original=$1, menor_preco=$2, ts=$3 WHERE id=$4",
@@ -275,16 +297,15 @@ class AliExpressSniperBot:
                     )
 
                 else:
-                    # Primeiro registro — salva e não posta ainda
-                    # EXCETO se já tem desconto absurdo (>= 40%) logo de cara
                     await conn.execute(
                         "INSERT INTO historico (id, preco_original, menor_preco, ts) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
                         pid, preco_original, melhor_preco, int(time.time())
                     )
-                    log.info(f"💾 Novo: {pid} | Original R$ {preco_original:.2f} | Venda R$ {melhor_preco:.2f} | {desconto_pct:.0f}% off [{tipo}]")
+                    log.info(f"💾 Novo: {pid} | Original R$ {preco_original:.2f} | Venda R$ {melhor_preco:.2f} | {oferta['desconto_pct']:.0f}% off [{tipo}]")
 
-                    if desconto_pct >= 40:
-                        log.info(f"💥 Desconto absurdo na 1ª vez ({desconto_pct:.0f}%), postando!")
+                    # Posta imediatamente se desconto absurdo na 1ª vez
+                    if oferta["desconto_pct"] >= 40:
+                        log.info(f"💥 Desconto absurdo ({oferta['desconto_pct']:.0f}%) na 1ª vez, postando!")
                         await self.enviar_oferta(p, oferta)
                         await conn.execute(
                             "INSERT INTO postados (id, tipo, ts) VALUES ($1, $2, $3) ON CONFLICT (id) DO UPDATE SET tipo=$2, ts=$3",
