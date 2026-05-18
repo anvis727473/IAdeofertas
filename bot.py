@@ -36,34 +36,42 @@ class OffersBot:
     async def post_new_offer(self, product_id: str, title: str, original_url: str, price_str: str, image_url: str = None):
         """Avalia inteligência de preço, monetiza o link e posta no Telegram."""
         
-        # 1. Filtro Anti-Duplicidade geral
+        # 1. Filtro Anti-Duplicidade geral (Evita reenviar o que já foi pro canal)
         if self.db.is_offer_posted(product_id):
+            logger.info(f"[Ignorado] Produto {product_id} já está publicado no canal.")
             return False
 
         # 2. Sanitização e verificação de preço
         current_price_float = parse_price(price_str)
         if current_price_float <= 0:
+            logger.warning(f"Preço inválido ignorado para o produto {product_id}: {price_str}")
             return False
             
+        # Puxa as métricas ANTIGAS antes de salvar o preço atual (para não distorcer a média)
+        avg_price, min_price = self.db.get_price_metrics(product_id)
+        
+        # Salva o preço atual no histórico de monitoramento
         self.db.save_price_if_changed(product_id, current_price_float)
 
-        # 3. Inteligência de Média de Preços (Dispara posts em quedas de valor)
-        avg_price, min_price = self.db.get_price_metrics(product_id)
+        # 3. CORREÇÃO DA INTELIGÊNCIA: Validação com Fase de Warmup (Aquecimento)
         discount_msg = ""
         
-        if avg_price and avg_price > 0 and avg_price != current_price_float:
+        if avg_price and avg_price > 0:
+            # O produto já tem histórico! Aplica o cálculo matemático do desconto real
             discount_percent = ((avg_price - current_price_float) / avg_price) * 100
             
             if discount_percent >= 10:
                 logger.info(f"🔥 PROMOÇÃO APROVADA: {product_id} com {discount_percent:.1f}% de desconto real.")
                 discount_msg = f"📉 *Desconto Real:* {discount_percent:.1f}% mais barato que a média do último mês!"
             else:
+                logger.info(f"❌ PROMOÇÃO BARRADA: {product_id} variação de preço fraca ({discount_percent:.1f}%).")
                 return False
         else:
-            logger.info(f"Monitorando item no radar de preços: {product_id}")
+            # CORREÇÃO: Produto novo na base é aprovado direto para alimentar o banco e o canal!
+            logger.info(f"🌟 PROMOÇÃO APROVADA (Novo Radar): Produto {product_id} cadastrado na base de dados.")
             discount_msg = "🌟 *Radar de Hardware Ativo!* Acompanhando variações de preço deste produto."
 
-        # 4. Geração do Link de Afiliado (Método 100% estável e autorizado)
+        # 4. Geração do Link de Afiliado monetizado
         affiliate_url = self.ali_client.generate_affiliate_link(original_url)
 
         # 5. Montagem do Template do Canal
@@ -79,15 +87,16 @@ class OffersBot:
 
 ⚠️ *Nota:* Estoques promocionais esgotam rápido. O preço pode alterar a qualquer momento!"""
 
-        # 6. Disparo Seguro para o Canal
+        # 6. Disparo Seguro para o Canal do Telegram
         try:
             if image_url:
                 await self.telegram_bot.send_photo(chat_id=self.chat_id, photo=image_url, caption=message_text, parse_mode='Markdown')
             else:
                 await self.telegram_bot.send_message(chat_id=self.chat_id, text=message_text, parse_mode='Markdown', disable_web_page_preview=False)
             
+            # Registra na tabela de postados para travar repetições futuras
             self.db.save_posted_offer(product_id, title, affiliate_url)
-            logger.info(f"[Sucesso] Produto {product_id} publicado no canal.")
+            logger.info(f"[Sucesso] Produto {product_id} integrado e publicado.")
             return True
 
         except Exception as e:
@@ -106,13 +115,13 @@ def run_mock_server():
 
 async def main():
     bot = OffersBot()
-    logger.info("Bot de Ofertas Inteligente (Estável) ativado no Render!")
+    logger.info("Bot de Ofertas Inteligente (Correção de Fluxo) ativado no Render!")
     
     while True:
         try:
             logger.info("Iniciando ciclo automático de verificação de radar...")
             
-            # Puxa a lista mapeada de alta conversão
+            # Puxa a lista mapeada do módulo do AliExpress
             lista_produtos = bot.ali_client.get_monitored_products()
             
             for prod in lista_produtos:
@@ -123,6 +132,7 @@ async def main():
                     price_str=prod["price"],
                     image_url=prod["image"]
                 )
+                # Pequeno intervalo para respeitar o limite das APIs
                 await asyncio.sleep(2)
             
             logger.info("Varredura concluída com sucesso. Aguardando 5 minutos para o próximo ciclo...")
