@@ -2,6 +2,7 @@ import time
 import hashlib
 import requests
 import logging
+import random
 from config import Config
 
 logger = logging.getLogger(__name__)
@@ -49,7 +50,6 @@ class AliExpressClient:
                 if links:
                     return links[0].get("promotion_link")
             
-            logger.warning(f"Não foi possível converter o link. Usando o original como fallback. Erro: {data}")
             return original_url
         except Exception as e:
             logger.error(f"Erro na chamada da API de links do AliExpress: {e}")
@@ -57,21 +57,28 @@ class AliExpressClient:
 
     def fetch_hot_products(self) -> list:
         """
-        Busca a lista de produtos mais quentes e promocionais do momento no AliExpress.
-        Filtra internamente pelas categorias de Tecnologia, Hardware e Utensílios.
+        Busca produtos de Hardware e Utensílios usando o endpoint de busca geral por palavras-chave.
+        Garante estabilidade e evita retornos vazios das campanhas.
         """
-        # IDs das categorias oficiais do AliExpress (Eletrônicos, Computadores, Ferramentas)
-        target_categories = ["509", "7", "21"] 
-        
+        # Lista de termos quentes do seu nicho para o bot revezar a cada 5 minutos
+        keywords_pool = [
+            "nvme ssd", "xiaomi router", "mechanical keyboard", "baseus led", 
+            "smart home zigbee", "electric screwdriver", "cpu cooler", "gaming mouse"
+        ]
+        selected_keyword = random.choice(keywords_pool)
+        logger.info(f"Buscando produtos na API com a palavra-chave: '{selected_keyword}'")
+
         params = {
-            "method": "aliexpress.affiliate.featuredpromo.products.get",
+            "method": "aliexpress.affiliate.products.get",
             "app_key": self.app_key,
             "timestamp": str(int(time.time() * 1000)),
             "format": "json",
             "v": "2.0",
             "sign_method": "md5",
-            "fields": "product_id,product_title,product_detail_url,target_sale_price,product_main_image_url,category_id",
-            "page_size": "20"  # Traz os 20 principais produtos por execução
+            "keywords": selected_keyword,
+            "fields": "product_id,product_title,product_detail_url,target_sale_price,product_main_image_url",
+            "page_size": "15",
+            "sort": "VOLUME_DESC" # Ordena pelos mais vendidos para garantir que são produtos bons
         }
         
         params["sign"] = self._generate_sign(params)
@@ -81,30 +88,30 @@ class AliExpressClient:
             response = requests.get(self.api_url, params=params, timeout=12)
             data = response.json()
             
-            # Navega no dicionário da resposta padrão do ecossistema Alibaba
-            result = data.get("aliexpress_affiliate_featuredpromo_products_get_response", {}).get("resp_result", {})
+            # Ajustado para mapear o nó de resposta do endpoint geral .products.get
+            result = data.get("aliexpress_affiliate_products_get_response", {}).get("resp_result", {})
             if result.get("code") == 200:
                 items = result.get("result", {}).get("products", {}).get("product", [])
                 
+                # Caso a API mude a estrutura de lista/objeto dinamicamente
+                if isinstance(items, dict):
+                    items = [items]
+
                 for item in items:
-                    cat_id = str(item.get("category_id"))
-                    
-                    # Filtro de Nicho: Garante que o bot só pegue Hardware/Tecnologia/Utensílios
-                    if any(cat in cat_id for cat in target_categories) or not target_categories:
-                        products_list.append({
-                            "id": str(item.get("product_id")),
-                            "title": item.get("product_title"),
-                            "url": item.get("product_detail_url"),
-                            "price": f"R$ {item.get('target_sale_price')}",
-                            "image": item.get("product_main_image_url")
-                        })
+                    products_list.append({
+                        "id": str(item.get("product_id")),
+                        "title": item.get("product_title"),
+                        "url": item.get("product_detail_url"),
+                        "price": f"R$ {item.get('target_sale_price')}",
+                        "image": item.get("product_main_image_url")
+                    })
                 
-                logger.info(f"API do AliExpress retornou {len(products_list)} produtos filtrados para o seu nicho.")
+                logger.info(f"Sucesso: {len(products_list)} produtos encontrados para '{selected_keyword}'.")
                 return products_list
             
             logger.error(f"Erro retornado pela API do AliExpress: {data}")
             return []
             
         except Exception as e:
-            logger.error(f"Falha de conexão ao buscar produtos na API do AliExpress: {e}")
+            logger.error(f"Falha de conexão ao buscar produtos na API: {e}")
             return []
