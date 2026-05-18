@@ -17,7 +17,7 @@ class OffersBot:
         # Garante que as variáveis críticas do Telegram estejam carregadas
         Config.validate()
         
-        # Inicializa o cliente HTTP do Telegram (Ideal usar a classe direta Bot para envio passivo/automação)
+        # Inicializa o cliente HTTP do Telegram para envio de automação passiva
         self.telegram_bot = Bot(token=Config.TELEGRAM_TOKEN)
         self.db = DatabaseManager()
         self.ali_client = AliExpressClient()
@@ -35,20 +35,18 @@ class OffersBot:
         # 2. Converte para link de Afiliado monetizado
         affiliate_url = self.ali_client.generate_affiliate_link(original_url)
 
-        # 3. Formata o template da mensagem (Markdown de fácil leitura)
-        message_text = (
-            f"🔥 *{title}*
+        # 3. Formata o template usando aspas triplas (f""") para evitar erros de compilação
+        # Customizado com foco em Hardware, Gadgets, Casa Inteligente e Ferramentas
+        message_text = f"""🛠️ *{title}*
 
-"
-            f"💰 Preço Imperdível: *{price}*
+💰 Preço Especial: *{price}*
 
-"
-            f"🛒 Compre pelo link de afiliado:
-[Clique aqui para ir ao AliExpress]({affiliate_url})
+🔌 *Categoria:* Hardware, Tecnologia & Utilidades para Casa
 
-"
-            f"⚠️ Oferta sujeita a alteração de preço a qualquer momento!"
-        )
+🛒 Compre com segurança pelo link de afiliado:
+[Clique aqui para abrir no AliExpress]({affiliate_url})
+
+⚠️ *Nota:* Os estoques de hardware e eletrônicos costumam esgotar rápido. O preço pode alterar a qualquer momento!"""
 
         # 4. Faz o disparo pelo Telegram
         try:
@@ -67,7 +65,7 @@ class OffersBot:
                     disable_web_page_preview=False
                 )
             
-            logger.info(f"[Sucesso] Oferta {product_id} enviada para o canal Telegram.")
+            logger.info(f"[Sucesso] Oferta de tecnologia {product_id} enviada para o Telegram.")
             
             # 5. Registra o ID no banco para travar re-postagem involuntária
             self.db.save_posted_offer(product_id, title, affiliate_url)
@@ -80,16 +78,16 @@ class OffersBot:
 async def main():
     # Inicializa o bot de ofertas
     bot = OffersBot()
-    logger.info("Bot de Ofertas AliExpress ativado com sucesso!")
+    logger.info("Bot de Ofertas (Hardware & Utensílios) ativado no Render!")
     
-    # Exemplo prático de execução simulada (substitua pelo loop do seu scraper, API ou feed)
-    mock_id = "1005009999999"
-    mock_title = "Carregador Rápido Baseus 30W USB-C GaN"
-    mock_url = "https://pt.aliexpress.com/item/1005009999999.html"
-    mock_price = "R$ 38,50"
-    mock_image = "https://images.unsplash.com/photo-1611532736597-de2d4265fba3?w=400" # Exemplo de imagem pública
+    # Exemplo prático de simulação com produto do seu novo nicho
+    mock_id = "1005006123456"
+    mock_title = "SSD NVMe M.2 Netac 1TB PCIe 4.0 - Alta Velocidade para PC"
+    mock_url = "https://pt.aliexpress.com/item/1005006123456.html"
+    mock_price = "R$ 289,90"
+    mock_image = "https://images.unsplash.com/photo-1591488320449-011701bb6704?w=500" # Imagem ilustrativa de hardware
     
-    logger.info(f"Executando simulação de postagem para o produto: {mock_id}")
+    logger.info(f"Executando teste de postagem para o hardware: {mock_id}")
     await bot.post_new_offer(
         product_id=mock_id,
         title=mock_title,
