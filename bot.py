@@ -58,10 +58,8 @@ class OffersBot:
                 logger.info(f"🔥 PROMOÇÃO APROVADA: {product_id} com {discount_percent:.1f}% de desconto real.")
                 discount_msg = f"📉 *Desconto Real:* {discount_percent:.1f}% mais barato que a média do último mês!"
             else:
-                # Se o desconto for menor que 10%, barra e ignora o item
                 return False
         else:
-            # Primeiro registro do produto na base de dados
             logger.info(f"Novo item adicionado ao radar de preços: {product_id}")
             discount_msg = "🌟 *Novo Radar de Hardware!* Monitorando variações de preço a partir de agora."
 
@@ -74,7 +72,7 @@ class OffersBot:
 💰 Preço Agora: *{price_str}*
 {discount_msg}
 
-🔌 *Categoria:* Hardware, Tecnologia & Utilidades
+🔌 *Categoria:* Hardware, Tecnologia & Utensílios
 
 🛒 Compre com segurança pelo link de afiliado:
 [Clique aqui para abrir no AliExpress]({affiliate_url})
@@ -88,7 +86,6 @@ class OffersBot:
             else:
                 await self.telegram_bot.send_message(chat_id=self.chat_id, text=message_text, parse_mode='Markdown', disable_web_page_preview=False)
             
-            # Registra sucesso para evitar re-postagem
             self.db.save_posted_offer(product_id, title, affiliate_url)
             logger.info(f"[Sucesso] Produto {product_id} publicado no canal.")
             return True
@@ -115,10 +112,9 @@ async def main():
         try:
             logger.info("Iniciando ciclo automático de busca via API AliExpress...")
             
-            # 1. BUSCA A LISTA REAL DE PRODUTOS DIRETO DA API DO ALIEXPRESS
+            # Busca a lista de produtos baseada nas palavras-chave rotativas
             lista_produtos = bot.ali_client.fetch_hot_products()
             
-            # 2. ITERA SOBRE A LISTA PROCESSANDO CADA ITEM INDIVIDUALMENTE
             for prod in lista_produtos:
                 await bot.post_new_offer(
                     product_id=prod["id"],
@@ -127,10 +123,8 @@ async def main():
                     price_str=prod["price"],
                     image_url=prod["image"]
                 )
-                # Delay de 2 segundos entre processamentos internos para evitar throttling das APIs
                 await asyncio.sleep(2)
             
-            # 3. ESPERA 5 MINUTOS ATÉ A PRÓXIMA ATUALIZAÇÃO DA API
             logger.info("Varredura de lista concluída. Aguardando 5 minutos para o próximo ciclo...")
             await asyncio.sleep(300)
             
