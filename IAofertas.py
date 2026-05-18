@@ -9,20 +9,20 @@ import os
 import re
 import sys
 import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
 import aiohttp
 import asyncpg
 from dotenv import load_dotenv
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib.parse import urlparse
 
 # =====================================================================
-# 1. SERVIDOR WEB (OBRIGATÓRIO PARA RENDER)
+# 1. SERVIDOR WEB (PARA O RENDER MANTER O PROCESSO VIVO)
 # =====================================================================
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Sniper v30: Pooler Mode Active")
+        self.wfile.write(b"Sniper v33: System Online")
     def log_message(self, format, *args): return
 
 def start_web_server():
@@ -30,18 +30,16 @@ def start_web_server():
     server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
     server.serve_forever()
 
-threading.Thread(target=start_web_server, daemon=True).start()
-
 # =====================================================================
-# 2. LOGS
+# 2. CONFIGURAÇÃO DE LOGS
 # =====================================================================
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-7s | %(message)s")
-log = logging.getLogger("Sniper_V30")
+log = logging.getLogger("Sniper_V33")
 
 class AliExpressSniperBot:
     def __init__(self):
         load_dotenv()
-        # Limpeza da URL
+        # Limpeza da URL de conexão
         raw_url = os.getenv("DATABASE_URL", "").strip().replace("'", "").replace('"', "")
         if raw_url.startswith("postgres://"):
             raw_url = raw_url.replace("postgres://", "postgresql://", 1)
@@ -59,17 +57,17 @@ class AliExpressSniperBot:
         self.session = None
 
     # =====================================================================
-    # 3. SETUP DB (VIA SUPAVISOR POOLER)
+    # 3. BANCO DE DADOS (OTIMIZADO PARA POOLER)
     # =====================================================================
     async def setup_db(self):
-        log.info("🐘 Conectando ao Pooler do Supabase...")
+        log.info("🐘 Conectando ao Banco de Dados (Supavisor)...")
         try:
-            # O asyncpg lida bem com o Pooler IPv4 do Supavisor (porta 6543)
+            # Conexão otimizada para o modo Session/Transaction do Supabase
             self.pool = await asyncpg.create_pool(
                 self.db_url,
                 ssl="require",
                 min_size=1,
-                max_size=10,
+                max_size=5,
                 command_timeout=60
             )
             
@@ -78,14 +76,14 @@ class AliExpressSniperBot:
                     CREATE TABLE IF NOT EXISTS historico (id TEXT PRIMARY KEY, preco FLOAT, ts BIGINT);
                     CREATE TABLE IF NOT EXISTS postados (id TEXT PRIMARY KEY, ts BIGINT);
                 ''')
-            log.info("🐘 Banco conectado via Pooler IPv4 com sucesso!")
+            log.info("✅ BANCO CONECTADO! Memória permanente ativada.")
         except Exception as e:
-            log.error(f"❌ Erro de Conexão: {e}")
-            log.error("DICA: Verifique se você está usando a URL do 'Connection Pooler' (porta 6543).")
+            log.error(f"❌ ERRO DE CONEXÃO: {e}")
+            log.info("⚠️ Verifique se o usuário na DATABASE_URL está no formato 'postgres.ID_DO_PROJETO'")
             sys.exit(1)
 
     # =====================================================================
-    # 4. FUNÇÕES DO BOT
+    # 4. BUSCA E AVALIAÇÃO DE PREÇOS
     # =====================================================================
     def sign_ali(self, p):
         data = "".join(f"{k}{v}" for k, v in sorted(p.items()) if v is not None)
@@ -94,9 +92,9 @@ class AliExpressSniperBot:
     async def run(self):
         await self.setup_db()
         self.session = aiohttp.ClientSession()
-        log.info("🚀 SNIPER v30 ONLINE!")
+        log.info("🚀 SNIPER v33 PRONTO PARA CAÇAR OFERTAS!")
         
-        marcas = ["Xiaomi", "Poco", "Nintendo", "Ryzen", "Anker", "Baseus", "SSD", "Ugreen"]
+        marcas = ["Xiaomi", "Poco", "Nintendo", "Anker", "Baseus", "Ugreen", "Ryzen", "SSD"]
         
         while True:
             try:
@@ -117,10 +115,8 @@ class AliExpressSniperBot:
                         
                         for p in prods:
                             pid = str(p['product_id'])
-                            # Tratamento de preço
                             try:
-                                pr_str = str(p.get("target_sale_price") or p.get("sale_price") or 0).replace(',', '.')
-                                preco = float(pr_str)
+                                preco = float(str(p.get("target_sale_price") or p.get("sale_price") or 0).replace(',', '.'))
                             except: continue
                             
                             if preco < 20: continue
@@ -128,23 +124,28 @@ class AliExpressSniperBot:
                             async with self.pool.acquire() as conn:
                                 row = await conn.fetchrow("SELECT preco FROM historico WHERE id = $1", pid)
                                 if row:
-                                    if preco <= (row['preco'] * 0.88):
+                                    p_hist = row['preco']
+                                    # POSTA SE A QUEDA FOR MAIOR QUE 10%
+                                    if preco <= (p_hist * 0.90):
                                         ja_postado = await conn.fetchval("SELECT 1 FROM postados WHERE id = $1", pid)
                                         if not ja_postado:
-                                            # Postagem
-                                            msg = (f"🚨 <b>QUEDA DE PREÇO!</b>\n\n"
+                                            # Envio para o Telegram
+                                            msg = (f"🚨 <b>O PREÇO BAIXOU!</b>\n\n"
                                                    f"📦 <b>{html.escape(p['product_title'][:70])}...</b>\n\n"
                                                    f"💰 <b>R$ {preco:,.2f}</b>\n"
-                                                   f"📉 Antes: <strike>R$ {row['preco']:,.2f}</strike>\n\n"
-                                                   f"🛒 <a href='{p['promotion_link']}'>COMPRAR AGORA</a>")
+                                                   f"📉 Antes: <strike>R$ {p_hist:,.2f}</strike>\n\n"
+                                                   f"🛒 <a href='{p['promotion_link']}'>COMPRAR NO ALIEXPRESS</a>")
                                             
                                             await self.session.post(f"{self.tg_api}/sendPhoto", 
                                                                    json={"chat_id": self.chat_id, "photo": p['product_main_image_url'], "caption": msg, "parse_mode": "HTML"})
                                             await conn.execute("INSERT INTO postados (id, ts) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET ts = $2", pid, int(time.time()))
+                                            log.info(f"🔥 OFERTA ENVIADA: {pid}")
                                     
-                                    if preco < row['preco']:
+                                    # Atualiza o preço se for menor que o anterior
+                                    if preco < p_hist:
                                         await conn.execute("UPDATE historico SET preco=$1, ts=$2 WHERE id=$3", preco, int(time.time()), pid)
                                 else:
+                                    # Primeiro registro do produto
                                     await conn.execute("INSERT INTO historico (id, preco, ts) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING", pid, preco, int(time.time()))
                 
                 await asyncio.sleep(45)
@@ -153,6 +154,9 @@ class AliExpressSniperBot:
                 await asyncio.sleep(20)
 
 if __name__ == "__main__":
+    # Inicia Web Server
+    threading.Thread(target=start_web_server, daemon=True).start()
+    
     bot = AliExpressSniperBot()
     try:
         asyncio.run(bot.run())
