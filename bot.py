@@ -80,22 +80,46 @@ async def main():
     bot = OffersBot()
     logger.info("Bot de Ofertas (Hardware & Utensílios) ativado no Render!")
     
-    # Exemplo prático de simulação com produto do seu novo nicho
-    mock_id = "1005006123456"
-    mock_title = "SSD NVMe M.2 Netac 1TB PCIe 4.0 - Alta Velocidade para PC"
-    mock_url = "https://pt.aliexpress.com/item/1005006123456.html"
-    mock_price = "R$ 289,90"
-    mock_image = "https://images.unsplash.com/photo-1591488320449-011701bb6704?w=500" # Imagem ilustrativa de hardware
-    
-    logger.info(f"Executando teste de postagem para o hardware: {mock_id}")
-    await bot.post_new_offer(
-        product_id=mock_id,
-        title=mock_title,
-        original_url=mock_url,
-        price=mock_price,
-        image_url=mock_image
-    )
+    # LOOP INFINITO: Mantém o Background Worker do Render rodando por tempo indeterminado
+    while True:
+        try:
+            logger.info("Iniciando ciclo de checagem de novas ofertas...")
+            
+            # =========================================================================
+            # ONDE SEU SCRAPER/FONTE DE DADOS ENTRA:
+            # 
+            # Aqui você vai chamar a função que coleta os produtos do AliExpress.
+            # Exemplo conceitual:
+            #
+            # de_ofertas = meu_scraper.pegar_promos_de_hardware()
+            # for item in de_ofertas:
+            #     await bot.post_new_offer(item['id'], item['titulo'], item['link'], item['preco'], item['imagem'])
+            # =========================================================================
+            
+            # Teste simulado (O banco vai barrar se o ID já foi postado antes)
+            mock_id = "1005006123456"
+            mock_title = "SSD NVMe M.2 Netac 1TB PCIe 4.0 - Alta Velocidade para PC"
+            mock_url = "https://pt.aliexpress.com/item/1005006123456.html"
+            mock_price = "R$ 289,90"
+            mock_image = "https://images.unsplash.com/photo-1591488320449-011701bb6704?w=500"
+            
+            await bot.post_new_offer(
+                product_id=mock_id,
+                title=mock_title,
+                original_url=mock_url,
+                price=mock_price,
+                image_url=mock_image
+            )
+            
+            # Tempo de espera entre as varreduras (600 segundos = 10 minutos)
+            logger.info("Ciclo finalizado. Aguardando 10 minutos para a próxima busca...")
+            await asyncio.sleep(600)
+            
+        except Exception as e:
+            logger.error(f"Erro crítico no loop principal do bot: {e}")
+            # Em caso de erro (queda de internet, API fora), aguarda 1 minuto antes de tentar de novo
+            await asyncio.sleep(60)
 
 if __name__ == "__main__":
-    # Loop assíncrono nativo exigido pelo python-telegram-bot v20+
+    # Inicializa o loop assíncrono exigido pela biblioteca do Telegram
     asyncio.run(main())
