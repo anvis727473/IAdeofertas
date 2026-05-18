@@ -17,27 +17,32 @@ import asyncpg
 from dotenv import load_dotenv
 
 # =====================================================================
-# 1. SERVIDOR WEB PARA O RENDER NÃO DESLIGAR (HEALTH CHECK)
+# 1. SERVIDOR WEB PARA O RENDER (PREVENT TIMEOUT)
 # =====================================================================
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Sniper IA is Running!")
+        self.wfile.write(b"Bot Sniper IA: Online e Operante")
 
     def log_message(self, format, *args):
-        return # Silenciar logs do servidor web para não sujar o terminal
+        return # Silencia logs de requisição no terminal
 
 def start_web_server():
     port = int(os.environ.get("PORT", 10000))
     server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+    log.info(f"🌐 Servidor Health Check ativo na porta {port}")
     server.serve_forever()
 
 # =====================================================================
-# 2. CONFIGURAÇÃO DE LOGS
+# 2. LOGS E AMBIENTE
 # =====================================================================
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-7s | %(message)s")
-log = logging.getLogger("Sniper_V22")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-7s | %(message)s",
+    datefmt="%H:%M:%S"
+)
+log = logging.getLogger("Sniper_V22_1")
 
 class AliExpressSniperBot:
     MARCAS_SNIPER = [
@@ -48,7 +53,7 @@ class AliExpressSniperBot:
     ]
     
     CONCURRENCY = 8
-    DELAY_CICLOS = 30
+    DELAY_CICLOS = 25
     MIN_SCORE = 30
     MIN_VALOR_BRL = 20.0
 
@@ -66,31 +71,42 @@ class AliExpressSniperBot:
         self.pool: Optional[asyncpg.Pool] = None
         self.session: Optional[aiohttp.ClientSession] = None
         self.sem = asyncio.Semaphore(self.CONCURRENCY)
+        self._active = True
 
     # =====================================================================
-    # 3. BANCO DE DADOS POSTGRESQL (MEMÓRIA PERMANENTE)
+    # 3. BANCO DE DADOS POSTGRESQL (FIX PARA PYTHON 3.14)
     # =====================================================================
     async def setup_db(self):
-        self.pool = await asyncpg.create_pool(self.db_url)
-        async with self.pool.acquire() as conn:
-            await conn.execute('''
-                CREATE TABLE IF NOT EXISTS historico (
-                    id TEXT PRIMARY KEY, preco FLOAT, ts BIGINT
-                );
-                CREATE TABLE IF NOT EXISTS postados (
-                    id TEXT PRIMARY KEY, ts BIGINT
-                );
-            ''')
-        log.info("🐘 Conectado ao PostgreSQL (Supabase) - Memória ativada!")
+        try:
+            # Limpeza rigorosa da URL para evitar o erro de IPv6 do Python 3.14
+            url = self.db_url.strip().replace('"', '').replace("'", "")
+            if url.startswith("postgres://"):
+                url = url.replace("postgres://", "postgresql://", 1)
 
-    async def get_stats(self) -> Tuple[int, int]:
-        async with self.pool.acquire() as conn:
-            h = await conn.fetchval("SELECT COUNT(*) FROM historico")
-            p = await conn.fetchval("SELECT COUNT(*) FROM postados")
-            return h, p
+            # Supabase exige SSL: "require" resolve o erro de conexão recusada
+            self.pool = await asyncpg.create_pool(
+                url, 
+                ssl="require",
+                min_size=1,
+                max_size=10
+            )
+            
+            async with self.pool.acquire() as conn:
+                await conn.execute('''
+                    CREATE TABLE IF NOT EXISTS historico (
+                        id TEXT PRIMARY KEY, preco FLOAT, ts BIGINT
+                    );
+                    CREATE TABLE IF NOT EXISTS postados (
+                        id TEXT PRIMARY KEY, ts BIGINT
+                    );
+                ''')
+            log.info("🐘 Conectado ao PostgreSQL (Supabase) - Memória Permanente Ativa!")
+        except Exception as e:
+            log.error(f"❌ Erro Crítico no Banco de Dados: {e}")
+            sys.exit(1)
 
     # =====================================================================
-    # 4. INTELIGÊNCIA E LIMPEZA
+    # 4. INTELIGÊNCIA DE DADOS
     # =====================================================================
     def sanitizar_float(self, valor) -> float:
         try:
@@ -104,11 +120,12 @@ class AliExpressSniperBot:
         except: return 0
 
     def limpar_titulo(self, t: str) -> str:
-        t = re.sub(r"(?i)\b(Global Version|Original|202[0-9]|Novo|Promo|Smartphone)\b", "", t)
+        t = re.sub(r"(?i)\b(Global Version|Original|Versão Global|202[0-9]|Novo|Promo|Smartphone|Tablet|Frete Grátis)\b", "", t)
+        t = re.sub(r"[^\w\s-]", "", t)
         return " ".join(t.split()[:6]).strip()
 
     # =====================================================================
-    # 5. API ALIEXPRESS
+    # 5. ALIEXPRESS API
     # =====================================================================
     def sign_ali(self, p: dict) -> str:
         data = "".join(f"{k}{v}" for k, v in sorted(p.items()) if v is not None)
@@ -132,13 +149,15 @@ class AliExpressSniperBot:
             except: return []
 
     async def post_tg(self, d: dict):
+        stars_visual = "⭐" * int(d['estrelas'] if d['estrelas'] <= 5 else 5)
         msg = (
             f"🚨 <b>QUEDA DE PREÇO DETECTADA! (-{d['queda']}%)</b>\n\n"
             f"📦 <b>{html.escape(d['titulo'])}</b>\n\n"
             f"💰 <b>Novo Preço: R$ {d['preco_atual']:,.2f}</b>\n"
             f"📉 Preço Base: <strike>R$ {d['preco_hist']:,.2f}</strike>\n\n"
-            f"⭐ {d['estrelas']:.1f} | 🛒 +{d['vendas']} vendidos\n"
-            f"🤖 <i>AI Score: {int(d['score'])}/100</i>"
+            f"{stars_visual} ({d['estrelas']:.1f})\n"
+            f"🛒 +{d['vendas']} unidades vendidas\n"
+            f"🤖 <i>AI Sniper Score: {int(d['score'])}/100</i>"
         )
         btns = {"inline_keyboard": [[{"text": "🎯 VER OFERTA NO ALIEXPRESS", "url": d['link']}]]}
         payload = {"chat_id": self.chat_id, "photo": d["img"], "caption": msg, "parse_mode": "HTML", "reply_markup": json.dumps(btns)}
@@ -146,7 +165,7 @@ class AliExpressSniperBot:
             return r.status == 200
 
     # =====================================================================
-    # 6. ENGINE PRINCIPAL
+    # 6. ENGINE DE PROCESSAMENTO
     # =====================================================================
     async def process_prod(self, p: dict):
         pid = str(p.get("product_id"))
@@ -167,7 +186,6 @@ class AliExpressSniperBot:
                         if not ja_postado:
                             estrelas = self.sanitizar_float(p.get("evaluate_rate"))
                             vendas = self.sanitizar_int(p.get("lastest_volume") or p.get("volume"))
-                            # Ajuste de escala de estrelas (100 -> 5)
                             est_f = (estrelas / 100 * 5) if estrelas > 5 else estrelas
                             score = (queda * 1.8) + ((est_f - 4) * 12) + (min(vendas / 50, 15))
                             
@@ -175,7 +193,7 @@ class AliExpressSniperBot:
                                 data = {"titulo": self.limpar_titulo(p['product_title']), "preco_atual": preco_atual, "preco_hist": p_hist, "queda": queda, "link": p['promotion_link'], "img": p['product_main_image_url'], "score": score, "estrelas": est_f, "vendas": vendas}
                                 if await self.post_tg(data):
                                     await conn.execute("INSERT INTO postados (id, ts) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET ts = $2", pid, int(time.time()))
-                                    log.info(f"✅ POSTADO: {data['titulo']}")
+                                    log.info(f"✅ POSTADO: {data['titulo']} | -{queda}%")
                 
                 if preco_atual < p_hist:
                     await conn.execute("UPDATE historico SET preco=$1, ts=$2 WHERE id=$3", preco_atual, int(time.time()), pid)
@@ -185,11 +203,14 @@ class AliExpressSniperBot:
     async def run(self):
         await self.setup_db()
         self.session = aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=50))
-        log.info("🚀 SNIPER V22 INICIADO (Render Web Ready)")
+        log.info("🚀 SNIPER IA OMEGA v22.1 INICIADO (Modo Render Web)")
 
-        while True:
+        while self._active:
             try:
-                h, p = await self.get_stats()
+                async with self.pool.acquire() as conn:
+                    h = await conn.fetchval("SELECT COUNT(*) FROM historico")
+                    p = await conn.fetchval("SELECT COUNT(*) FROM postados")
+                
                 log.info("-" * 50)
                 log.info(f"📊 RADAR OMEGA: {h} itens catalogados | {p} enviados")
                 log.info("-" * 50)
@@ -200,15 +221,18 @@ class AliExpressSniperBot:
                     if prods:
                         for item in prods: await self.process_prod(item)
                 
-                log.info(f"✨ Ciclo finalizado. Esperando {self.DELAY_CICLOS}s...")
+                log.info(f"✨ Ciclo completo. Esperando {self.DELAY_CICLOS}s...")
                 await asyncio.sleep(self.DELAY_CICLOS)
             except Exception as e:
-                log.error(f"Erro: {e}")
+                log.error(f"⚠️ Erro no Loop Principal: {e}")
                 await asyncio.sleep(20)
 
 if __name__ == "__main__":
-    # Inicia o servidor web em uma thread separada para o Render
+    # Servidor Health Check para o Render
     threading.Thread(target=start_web_server, daemon=True).start()
     
     bot = AliExpressSniperBot()
-    asyncio.run(bot.run())
+    try:
+        asyncio.run(bot.run())
+    except KeyboardInterrupt:
+        log.warning("🛑 Bot parado pelo usuário.")
