@@ -9,19 +9,20 @@ import os
 import re
 import sys
 import threading
+import socket  # Importante para forçar IPv4
 import aiohttp
 import asyncpg
 from dotenv import load_dotenv
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # =====================================================================
-# 1. SERVIDOR WEB (Obrigatório para Render Web Service)
+# 1. SERVIDOR WEB (PREVENT TIMEOUT)
 # =====================================================================
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Bot Sniper Omega: Ativo")
+        self.wfile.write(b"Bot Sniper v24: Ativo")
     def log_message(self, format, *args): return
 
 def start_web_server():
@@ -29,11 +30,8 @@ def start_web_server():
     server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
     server.serve_forever()
 
-# =====================================================================
-# 2. LOGS
-# =====================================================================
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-7s | %(message)s")
-log = logging.getLogger("Sniper_V23")
+log = logging.getLogger("Sniper_V24")
 
 class AliExpressSniperBot:
     def __init__(self):
@@ -51,31 +49,36 @@ class AliExpressSniperBot:
         self.session = None
 
     # =====================================================================
-    # 3. PARSER MANUAL (Ignora o bug de IPv6 do Python 3.14)
+    # 3. CONEXÃO FORÇADA IPv4 (Ignora bugs de rede do Python 3.14)
     # =====================================================================
     async def setup_db(self):
-        log.info("🐘 Iniciando conexão manual com o banco...")
+        log.info("🐘 Resolvendo endereço do banco (Forçando IPv4)...")
         try:
-            # Desmontagem manual da string para evitar urllib.parse
-            # Ex: postgresql://user:pass@host:port/dbname
+            # 1. Quebra a URL manualmente
             url = self.db_url.replace("postgresql://", "").replace("postgres://", "")
-            
             auth, rest = url.split("@")
             user, password = auth.split(":")
-            
             host_port, dbname = rest.split("/")
+            
             if ":" in host_port:
                 host, port = host_port.split(":")
             else:
                 host, port = host_port, 5432
 
+            # 2. TRUQUE MÁGICO: Converte o host (texto) em um IP (número)
+            # Isso impede que o Python 3.14 tente usar IPv6 e falhe.
+            host_ip = socket.gethostbyname(host)
+            log.info(f"🐘 Host {host} resolvido para IP {host_ip}")
+
+            # 3. Conecta usando o IP diretamente
             self.pool = await asyncpg.create_pool(
                 user=user,
                 password=password,
-                host=host,
+                host=host_ip,  # Usa o IP
                 port=int(port),
                 database=dbname,
-                ssl="require"
+                ssl="require",
+                timeout=30
             )
             
             async with self.pool.acquire() as conn:
@@ -83,13 +86,13 @@ class AliExpressSniperBot:
                     CREATE TABLE IF NOT EXISTS historico (id TEXT PRIMARY KEY, preco FLOAT, ts BIGINT);
                     CREATE TABLE IF NOT EXISTS postados (id TEXT PRIMARY KEY, ts BIGINT);
                 ''')
-            log.info("🐘 Conectado ao Supabase com sucesso (Manual Bypass)!")
+            log.info("🐘 Conexão OMEGA estabelecida com sucesso!")
         except Exception as e:
-            log.error(f"❌ Erro ao processar DATABASE_URL: {e}")
+            log.error(f"❌ Erro de Rede Fatal: {e}")
             sys.exit(1)
 
     # =====================================================================
-    # 4. FUNÇÕES DE BUSCA E POSTAGEM
+    # 4. ENGINE
     # =====================================================================
     def sign_ali(self, p):
         data = "".join(f"{k}{v}" for k, v in sorted(p.items()) if v is not None)
@@ -98,17 +101,12 @@ class AliExpressSniperBot:
     async def run(self):
         await self.setup_db()
         self.session = aiohttp.ClientSession()
-        log.info("🚀 SNIPER v23 ONLINE!")
+        log.info("🚀 BOT SNIPER ONLINE!")
         
-        marcas = ["Xiaomi", "Poco", "Nintendo", "Anker", "Baseus", "Ugreen", "Ryzen", "SSD"]
+        marcas = ["Xiaomi", "Poco", "Samsung", "Nintendo", "SSD", "Anker", "Baseus"]
         
         while True:
             try:
-                # Mostra o radar
-                async with self.pool.acquire() as conn:
-                    h = await conn.fetchval("SELECT COUNT(*) FROM historico")
-                    log.info(f"📊 Radar: {h} itens monitorados.")
-
                 for m in marcas:
                     params = {
                         "app_key": self.ali_key, "method": "aliexpress.affiliate.product.query",
@@ -125,18 +123,20 @@ class AliExpressSniperBot:
                         
                         for p in prods:
                             pid = str(p['product_id'])
-                            preco = float(p.get("target_sale_price") or p.get("sale_price") or 0)
+                            # Limpa o preço de qualquer lixo de texto
+                            preco_str = str(p.get("target_sale_price") or p.get("sale_price") or "0")
+                            preco = float(re.sub(r'[^\d.]', '', preco_str.replace(',', '.')))
+                            
                             if preco < 20: continue
 
                             async with self.pool.acquire() as conn:
                                 row = await conn.fetchrow("SELECT preco FROM historico WHERE id = $1", pid)
                                 if row:
-                                    # Se o preço cair mais de 10%
-                                    if preco <= (row['preco'] * 0.90):
+                                    if preco <= (row['preco'] * 0.88): # 12% de queda
                                         ja_postado = await conn.fetchval("SELECT 1 FROM postados WHERE id = $1", pid)
                                         if not ja_postado:
-                                            # Enviar Telegram
-                                            msg = f"🚨 <b>QUEDA DE PREÇO!</b>\n\n📦 <b>{html.escape(p['product_title'][:60])}</b>\n\n💰 <b>R$ {preco:,.2f}</b>\n📉 Base: R$ {row['preco']:,.2f}\n\n🛒 <a href='{p['promotion_link']}'>COMPRAR AGORA</a>"
+                                            log.info(f"🔥 Oferta Detectada: {pid}")
+                                            msg = f"🚨 <b>PREÇO BAIXOU!</b>\n\n📦 <b>{html.escape(p['product_title'][:70])}</b>\n\n💰 <b>R$ {preco:,.2f}</b>\n📉 Antes: R$ {row['preco']:,.2f}\n\n🛒 <a href='{p['promotion_link']}'>COMPRAR AGORA</a>"
                                             await self.session.post(f"{self.tg_api}/sendPhoto", json={"chat_id": self.chat_id, "photo": p['product_main_image_url'], "caption": msg, "parse_mode": "HTML"})
                                             await conn.execute("INSERT INTO postados (id, ts) VALUES ($1, $2)", pid, int(time.time()))
                                     
@@ -145,15 +145,13 @@ class AliExpressSniperBot:
                                 else:
                                     await conn.execute("INSERT INTO historico (id, preco, ts) VALUES ($1, $2, $3)", pid, preco, int(time.time()))
                 
-                await asyncio.sleep(40)
+                await asyncio.sleep(45)
             except Exception as e:
-                log.error(f"Erro no loop: {e}")
+                log.error(f"Erro no ciclo: {e}")
                 await asyncio.sleep(20)
 
 if __name__ == "__main__":
-    # Inicia o servidor web para o Render não dar erro de porta
     threading.Thread(target=start_web_server, daemon=True).start()
-    
     bot = AliExpressSniperBot()
     try:
         asyncio.run(bot.run())
