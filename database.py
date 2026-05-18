@@ -25,7 +25,6 @@ class DatabaseManager:
                     port=Config.DB_PORT
                 )
             
-            # Cria as tabelas automaticamente se elas não existirem
             self._create_tables_if_not_exists()
 
         except Exception as e:
@@ -47,7 +46,6 @@ class DatabaseManager:
             return
         try:
             with conn.cursor() as cursor:
-                # Tabela 1: Evitar Duplicatas
                 query_postadas = """
                 CREATE TABLE IF NOT EXISTS ofertas_postadas (
                     produto_id VARCHAR(50) PRIMARY KEY,
@@ -56,8 +54,6 @@ class DatabaseManager:
                     data_postagem TIMESTAMP DEFAULT NOW()
                 );
                 """
-                
-                # Tabela 2: Inteligência de Preços
                 query_precos = """
                 CREATE TABLE IF NOT EXISTS historico_precos (
                     id SERIAL PRIMARY KEY,
@@ -67,7 +63,6 @@ class DatabaseManager:
                 );
                 CREATE INDEX IF NOT EXISTS idx_produto_data ON historico_precos(produto_id, data_coleta);
                 """
-                
                 cursor.execute(query_postadas)
                 cursor.execute(query_precos)
                 conn.commit()
@@ -108,23 +103,18 @@ class DatabaseManager:
         finally:
             self.put_connection(conn)
 
-    # ================= NOVAS FUNÇÕES DE INTELIGÊNCIA =================
-
     def save_price_if_changed(self, product_id: str, price: float):
-        """Eficiência Máxima: Só salva o preço no banco se ele for diferente da última checagem."""
+        """Só salva o preço se for diferente do último registrado."""
         conn = self.get_connection()
         if not conn: return
         try:
             with conn.cursor() as cursor:
-                # Checa qual foi o último preço registrado deste produto
                 cursor.execute("SELECT preco FROM historico_precos WHERE produto_id = %s ORDER BY data_coleta DESC LIMIT 1;", (product_id,))
                 result = cursor.fetchone()
                 
                 if result and float(result[0]) == price:
-                    # Preço não mudou, economiza processamento e espaço
                     return 
 
-                # Preço é novo (ou produto novo), insere no banco
                 cursor.execute("INSERT INTO historico_precos (produto_id, preco) VALUES (%s, %s);", (product_id, price))
                 conn.commit()
         except Exception as e:
@@ -134,7 +124,7 @@ class DatabaseManager:
             self.put_connection(conn)
 
     def get_price_metrics(self, product_id: str):
-        """Calcula a média de preço dos últimos 30 dias para o produto. Retorna (Média, Preço Mínimo)."""
+        """Calcula a média de preço dos últimos 30 dias para o produto."""
         conn = self.get_connection()
         if not conn: return None, None
         try:
