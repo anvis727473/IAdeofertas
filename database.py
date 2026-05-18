@@ -40,7 +40,6 @@ class DatabaseManager:
             self.connection_pool.putconn(conn)
 
     def _create_tables_if_not_exists(self):
-        """Cria as tabelas de histórico e de postagens no PostgreSQL."""
         conn = self.get_connection()
         if not conn:
             return
@@ -74,7 +73,6 @@ class DatabaseManager:
             self.put_connection(conn)
 
     def is_offer_posted(self, product_id: str) -> bool:
-        """Verifica se a oferta já foi postada para evitar duplicatas."""
         conn = self.get_connection()
         if not conn: return False
         try:
@@ -87,7 +85,6 @@ class DatabaseManager:
             self.put_connection(conn)
 
     def save_posted_offer(self, product_id: str, title: str, url: str):
-        """Registra a oferta para evitar futuras postagens duplicadas."""
         conn = self.get_connection()
         if not conn: return
         try:
@@ -104,7 +101,6 @@ class DatabaseManager:
             self.put_connection(conn)
 
     def save_price_if_changed(self, product_id: str, price: float):
-        """Só salva o preço se for diferente do último registrado."""
         conn = self.get_connection()
         if not conn: return
         try:
@@ -124,7 +120,6 @@ class DatabaseManager:
             self.put_connection(conn)
 
     def get_price_metrics(self, product_id: str):
-        """Calcula a média de preço dos últimos 30 dias para o produto."""
         conn = self.get_connection()
         if not conn: return None, None
         try:
