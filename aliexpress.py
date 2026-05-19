@@ -1,10 +1,8 @@
 # aliexpress.py
 
 import hashlib
-import json
 import logging
 import random
-import re
 import time
 
 from dataclasses import dataclass, field, asdict
@@ -25,17 +23,26 @@ logger = logging.getLogger(__name__)
 class Product:
 
     id: str
+
     title: str
+
     url: str
+
     image: str
+
     price_value: float
 
     sold_count: int = 0
+
     rating: float = 0.0
+
+    shipping: str = ""
 
     is_choice: bool = False
 
     score: int = 0
+
+    keyword: str = ""
 
     raw: dict = field(default_factory=dict)
 
@@ -60,21 +67,21 @@ class AliExpressClient:
         Config.validate()
 
         self.app_key = Config.ALI_KEY
+
         self.secret = Config.ALI_SECRET
+
         self.tracking_id = Config.ALI_TRACKING_ID
 
         self.api_url = (
             "https://api-sg.aliexpress.com/sync"
         )
 
-        self.search_keywords = (
-            Config.SEARCH_KEYWORDS
-        )
-
         self.session = requests.Session()
 
         retries = Retry(
-            total=3,
+            total=5,
+            connect=5,
+            read=5,
             backoff_factor=1,
             status_forcelist=[
                 429,
@@ -87,8 +94,8 @@ class AliExpressClient:
 
         adapter = HTTPAdapter(
             max_retries=retries,
-            pool_connections=20,
-            pool_maxsize=20
+            pool_connections=50,
+            pool_maxsize=50
         )
 
         self.session.mount(
@@ -96,18 +103,100 @@ class AliExpressClient:
             adapter
         )
 
+        self.search_keywords = [
+
+            "SSD NVMe",
+
+            "RTX 4060",
+
+            "Mouse Gamer",
+
+            "Teclado Mecânico",
+
+            "Monitor Portátil",
+
+            "Dock USB C",
+
+            "Headset Bluetooth",
+
+            "Smartwatch AMOLED",
+
+            "Tablet Xiaomi",
+
+            "Power Bank",
+
+            "Mini PC",
+
+            "Projetor 4K",
+
+            "Câmera WiFi",
+
+            "Hub USB C",
+
+            "Parafusadeira Xiaomi",
+
+            "Baseus Charger",
+
+            "Controle Bluetooth",
+
+            "Fone Bluetooth",
+
+            "Carregador GaN",
+
+            "Microfone USB"
+        ]
+
     def _headers(self):
 
-        return {
-            "User-Agent": random.choice(
-                Config.USER_AGENTS
+        user_agents = [
+
+            (
+                "Mozilla/5.0 "
+                "(Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 "
+                "(KHTML, like Gecko) "
+                "Chrome/136.0.0.0 Safari/537.36"
             ),
-            "Accept-Language":
-                "pt-BR,pt;q=0.9,en;q=0.8",
+
+            (
+                "Mozilla/5.0 "
+                "(Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 "
+                "(KHTML, like Gecko) "
+                "Chrome/135.0 Safari/537.36"
+            ),
+
+            (
+                "Mozilla/5.0 "
+                "(X11; Linux x86_64) "
+                "AppleWebKit/537.36 "
+                "(KHTML, like Gecko) "
+                "Chrome/134.0 Safari/537.36"
+            )
+        ]
+
+        return {
+
+            "User-Agent":
+                random.choice(user_agents),
+
             "Accept":
-                "text/html,application/xhtml+xml",
+                "application/json,text/plain,*/*",
+
+            "Accept-Language":
+                "pt-BR,pt;q=0.9,en-US;q=0.8",
+
+            "Origin":
+                "https://pt.aliexpress.com",
+
             "Referer":
                 "https://pt.aliexpress.com/",
+
+            "Cache-Control":
+                "no-cache",
+
+            "Pragma":
+                "no-cache"
         }
 
     def _generate_sign(
@@ -137,6 +226,7 @@ class AliExpressClient:
     ) -> str:
 
         params = {
+
             "method":
                 "aliexpress.affiliate.link.generate",
 
@@ -144,7 +234,9 @@ class AliExpressClient:
                 self.app_key,
 
             "timestamp":
-                str(int(time.time() * 1000)),
+                str(
+                    int(time.time() * 1000)
+                ),
 
             "format":
                 "json",
@@ -171,7 +263,7 @@ class AliExpressClient:
             response = self.session.get(
                 self.api_url,
                 params=params,
-                timeout=15
+                timeout=20
             )
 
             data = response.json()
@@ -181,18 +273,33 @@ class AliExpressClient:
                     "aliexpress_affiliate_link_generate_response",
                     {}
                 )
-                .get("resp_result", {})
+                .get(
+                    "resp_result",
+                    {}
+                )
             )
 
             if result.get("code") == 200:
 
                 links = (
-                    result.get("result", {})
-                    .get("promolink_list", {})
-                    .get("promo_link", [])
+                    result.get(
+                        "result",
+                        {}
+                    )
+                    .get(
+                        "promolink_list",
+                        {}
+                    )
+                    .get(
+                        "promo_link",
+                        []
+                    )
                 )
 
-                if isinstance(links, dict):
+                if isinstance(
+                    links,
+                    dict
+                ):
                     links = [links]
 
                 if links:
@@ -224,272 +331,272 @@ class AliExpressClient:
             f"Garimpando keyword: {keyword}"
         )
 
-        url = (
-            "https://pt.aliexpress.com/w/wholesale-"
-            f"{quote_plus(keyword)}.html"
-        )
-
         try:
+
+            url = (
+                "https://pt.aliexpress.com/"
+                "aeglodetailweb/api/"
+                "search/searchProducts.htm"
+            )
+
+            params = {
+
+                "SearchText":
+                    keyword,
+
+                "page":
+                    1,
+
+                "origin":
+                    "y",
+
+                "sortType":
+                    "total_tranpro_desc",
+
+                "pageSize":
+                    20
+            }
 
             response = self.session.get(
                 url,
+                params=params,
                 headers=self._headers(),
                 timeout=20
             )
 
-            html = response.text
+            logger.info(
+                f"Status API Busca: "
+                f"{response.status_code}"
+            )
 
-            products = (
-                self._extract_products_from_html(
-                    html
+            if response.status_code != 200:
+
+                return []
+
+            data = response.json()
+
+            items = (
+                data.get(
+                    "mods",
+                    {}
+                )
+                .get(
+                    "itemList",
+                    {}
+                )
+                .get(
+                    "content",
+                    []
                 )
             )
 
             logger.info(
-                f"{len(products)} produtos encontrados"
+                f"{len(items)} produtos "
+                f"brutos encontrados"
             )
 
-            return products
+            products = []
+
+            for item in items:
+
+                try:
+
+                    product_id = str(
+                        item.get(
+                            "productId",
+                            ""
+                        )
+                    )
+
+                    if not product_id:
+                        continue
+
+                    title = (
+                        item.get(
+                            "title",
+                            ""
+                        )
+                        .replace(
+                            "\n",
+                            " "
+                        )
+                        .strip()
+                    )
+
+                    if len(title) < 10:
+                        continue
+
+                    image = (
+                        item.get(
+                            "image",
+                            ""
+                        )
+                    )
+
+                    if image.startswith("//"):
+                        image = (
+                            "https:" + image
+                        )
+
+                    if not image:
+                        continue
+
+                    product_url = (
+                        "https://pt.aliexpress.com/item/"
+                        f"{product_id}.html"
+                    )
+
+                    prices = item.get(
+                        "prices",
+                        {}
+                    )
+
+                    sale_price = (
+                        prices.get(
+                            "salePrice",
+                            {}
+                        )
+                    )
+
+                    min_price = (
+                        sale_price.get(
+                            "minPrice",
+                            ""
+                        )
+                    )
+
+                    if not min_price:
+                        continue
+
+                    try:
+
+                        price = float(
+                            str(min_price)
+                            .replace("R$", "")
+                            .replace(".", "")
+                            .replace(",", ".")
+                            .strip()
+                        )
+
+                    except Exception:
+                        continue
+
+                    trade_desc = (
+                        item.get(
+                            "tradeDesc",
+                            "0"
+                        )
+                    )
+
+                    sold_count = 0
+
+                    try:
+
+                        sold_count = int(
+                            (
+                                trade_desc
+                                .split()[0]
+                                .replace(".", "")
+                            )
+                        )
+
+                    except Exception:
+                        pass
+
+                    is_choice = (
+                        item.get(
+                            "deliveryExt",
+                            {}
+                        )
+                        .get(
+                            "displayTagType",
+                            ""
+                        )
+                        == "choice"
+                    )
+
+                    rating = 0.0
+
+                    try:
+
+                        rating = float(
+                            item.get(
+                                "evaluation",
+                                "0"
+                            )
+                        )
+
+                    except Exception:
+                        pass
+
+                    shipping = (
+                        "Frete grátis"
+                        if is_choice
+                        else ""
+                    )
+
+                    product = Product(
+
+                        id=product_id,
+
+                        title=title,
+
+                        url=product_url,
+
+                        image=image,
+
+                        price_value=price,
+
+                        sold_count=sold_count,
+
+                        rating=rating,
+
+                        shipping=shipping,
+
+                        is_choice=is_choice,
+
+                        keyword=keyword,
+
+                        raw=item
+                    )
+
+                    product.score = (
+                        self._calculate_score(
+                            product
+                        )
+                    )
+
+                    if product.score >= 2:
+
+                        products.append(
+                            product
+                        )
+
+                except Exception as e:
+
+                    logger.warning(
+                        f"Erro item: {e}"
+                    )
+
+            logger.info(
+                f"{len(products)} produtos "
+                f"válidos encontrados"
+            )
+
+            products.sort(
+                key=lambda x: x.score,
+                reverse=True
+            )
+
+            return products[:10]
 
         except Exception as e:
 
             logger.exception(
-                f"Erro scraping: {e}"
+                f"Erro no garimpo: {e}"
             )
 
             return []
-
-    def _extract_products_from_html(
-        self,
-        html: str
-    ) -> List[Product]:
-
-        found_products = []
-
-        seen = set()
-
-        product_pattern = re.finditer(
-            r'/item/(\d+)\.html',
-            html
-        )
-
-        for match in product_pattern:
-
-            try:
-
-                product_id = match.group(1)
-
-                if product_id in seen:
-                    continue
-
-                seen.add(product_id)
-
-                start = max(
-                    0,
-                    match.start() - 2500
-                )
-
-                end = min(
-                    len(html),
-                    match.end() + 2500
-                )
-
-                block = html[start:end]
-
-                title = self._extract_title(
-                    block
-                )
-
-                image = self._extract_image(
-                    block
-                )
-
-                price = self._extract_price(
-                    block
-                )
-
-                sold = self._extract_sold(
-                    block
-                )
-
-                if not title:
-                    continue
-
-                if not image:
-                    continue
-
-                if price <= 0:
-                    continue
-
-                product_url = (
-                    "https://pt.aliexpress.com/item/"
-                    f"{product_id}.html"
-                )
-
-                product = Product(
-                    id=product_id,
-                    title=title,
-                    url=product_url,
-                    image=image,
-                    price_value=price,
-                    sold_count=sold,
-                    is_choice=(
-                        "choice" in block.lower()
-                    )
-                )
-
-                product.score = (
-                    self._calculate_score(
-                        product
-                    )
-                )
-
-                found_products.append(
-                    product
-                )
-
-                if len(found_products) >= 10:
-                    break
-
-            except Exception:
-                continue
-
-        return found_products
-
-    def _extract_title(
-        self,
-        text: str
-    ) -> str:
-
-        patterns = [
-
-            r'"title":"([^"]+)"',
-
-            r'"displayTitle":"([^"]+)"',
-
-            r'alt="([^"]+)"'
-        ]
-
-        for pattern in patterns:
-
-            match = re.search(
-                pattern,
-                text,
-                re.I
-            )
-
-            if match:
-
-                title = (
-                    match.group(1)
-                    .replace("\\u0026", "&")
-                    .replace("&amp;", "&")
-                    .replace("\\", "")
-                    .strip()
-                )
-
-                if len(title) >= 10:
-                    return title
-
-        return ""
-
-    def _extract_image(
-        self,
-        text: str
-    ) -> str:
-
-        patterns = [
-
-            r'https://[^"]+\.(jpg|jpeg|png|webp)',
-
-            r'//[^"]+\.(jpg|jpeg|png|webp)'
-        ]
-
-        for pattern in patterns:
-
-            match = re.search(
-                pattern,
-                text,
-                re.I
-            )
-
-            if match:
-
-                image = match.group(0)
-
-                if image.startswith("//"):
-                    image = "https:" + image
-
-                return image
-
-        return ""
-
-    def _extract_price(
-        self,
-        text: str
-    ) -> float:
-
-        patterns = [
-
-            r'R\$\s?([\d.,]+)',
-
-            r'"price":"([\d.,]+)"',
-
-            r'"salePrice":"([\d.,]+)"'
-        ]
-
-        for pattern in patterns:
-
-            match = re.search(
-                pattern,
-                text
-            )
-
-            if match:
-
-                try:
-
-                    value = (
-                        match.group(1)
-                        .replace(".", "")
-                        .replace(",", ".")
-                    )
-
-                    return float(value)
-
-                except Exception:
-                    continue
-
-        return 0.0
-
-    def _extract_sold(
-        self,
-        text: str
-    ) -> int:
-
-        patterns = [
-
-            r'(\d+)\s+vendidos',
-
-            r'"tradeCount":"(\d+)"'
-        ]
-
-        for pattern in patterns:
-
-            match = re.search(
-                pattern,
-                text,
-                re.I
-            )
-
-            if match:
-
-                try:
-                    return int(match.group(1))
-                except Exception:
-                    pass
-
-        return 0
 
     def _calculate_score(
         self,
@@ -501,7 +608,28 @@ class AliExpressClient:
         if product.is_choice:
             score += 3
 
-        if product.sold_count >= 5000:
+        if product.rating >= 4.9:
+            score += 4
+
+        elif product.rating >= 4.8:
+            score += 3
+
+        elif product.rating >= 4.5:
+            score += 2
+
+        elif product.rating >= 4.0:
+            score += 1
+
+        if product.sold_count >= 50000:
+            score += 6
+
+        elif product.sold_count >= 20000:
+            score += 5
+
+        elif product.sold_count >= 10000:
+            score += 4
+
+        elif product.sold_count >= 5000:
             score += 3
 
         elif product.sold_count >= 1000:
@@ -510,7 +638,7 @@ class AliExpressClient:
         elif product.sold_count >= 100:
             score += 1
 
-        if product.price_value <= 150:
+        if product.price_value <= 300:
             score += 1
 
         return score
