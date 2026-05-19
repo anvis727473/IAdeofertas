@@ -10,7 +10,6 @@ from config import Config
 from database import DatabaseManager
 from aliexpress import AliExpressClient
 
-# Configuração de Logs
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -18,8 +17,15 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 def parse_price(price_str: str) -> float:
-    """Converte strings de preço em float matemático."""
-    clean_str = re.sub(r'[^\d,.]', '', price_str).replace(',', '.')
+    """Saneia e converte qualquer formato de preço da API em Float."""
+    if not price_str:
+        return 0.0
+    clean_str = re.sub(r'[^\d,.]', '', price_str)
+    # Trata caso venha com pontos e vírgulas invertidos
+    if ',' in clean_str and '.' in clean_str:
+        clean_str = clean_str.replace('.', '').replace(',', '.')
+    elif ',' in clean_str:
+        clean_str = clean_str.replace(',', '.')
     try:
         return float(clean_str)
     except ValueError:
@@ -33,78 +39,71 @@ class OffersBot:
         self.ali_client = AliExpressClient()
         self.chat_id = Config.ID_DO_GRUPO
 
-    async def post_new_offer(self, product_id: str, title: str, original_url: str, price_str: str, image_url: str = None):
-        """Avalia inteligência de preço, monetiza o link e posta no Telegram."""
+    async def process_product_pipeline(self, product_id: str):
+        """Pipeline ponta a ponta: busca preço real, analisa histórico e decide postagem."""
         
-        # 1. Filtro Anti-Duplicidade geral (Evita reenviar o que já foi pro canal)
+        # 1. Filtro Anti-Duplicidade do Canal
         if self.db.is_offer_posted(product_id):
-            logger.info(f"[Ignorado] Produto {product_id} já está publicado no canal.")
-            return False
+            logger.info(f"[Ignorado] {product_id} já enviado recentemente ao canal.")
+            return
 
-        # 2. Sanitização e verificação de preço
-        current_price_float = parse_price(price_str)
+        # 2. Coleta de Dados ao Vivo via API
+        prod_data = self.ali_client.fetch_live_product_details(product_id)
+        if not prod_data.get("success"):
+            return
+
+        current_price_float = parse_price(prod_data["price"])
         if current_price_float <= 0:
-            logger.warning(f"Preço inválido ignorado para o produto {product_id}: {price_str}")
-            return False
-            
-        # Puxa as métricas ANTIGAS antes de salvar o preço atual (para não distorcer a média)
-        avg_price, min_price = self.db.get_price_metrics(product_id)
-        
-        # Salva o preço atual no histórico de monitoramento
+            return
+
+        # Captura métricas históricas antes de atualizar com o valor de agora
+        avg_price, _ = self.db.get_price_metrics(product_id)
         self.db.save_price_if_changed(product_id, current_price_float)
 
-        # 3. CORREÇÃO DA INTELIGÊNCIA: Validação com Fase de Warmup (Aquecimento)
+        # 3. Inteligência Artificial de Preços com Warmup
         discount_msg = ""
-        
         if avg_price and avg_price > 0:
-            # O produto já tem histórico! Aplica o cálculo matemático do desconto real
             discount_percent = ((avg_price - current_price_float) / avg_price) * 100
             
-            if discount_percent >= 10:
-                logger.info(f"🔥 PROMOÇÃO APROVADA: {product_id} com {discount_percent:.1f}% de desconto real.")
-                discount_msg = f"📉 *Desconto Real:* {discount_percent:.1f}% mais barato que a média do último mês!"
+            if discount_percent >= 8:  # Otimizado de 10% para 8% para pegar pequenas flutuações agressivas
+                logger.info(f"🔥 PROMOÇÃO DETECTADA: {product_id} com {discount_percent:.1f}% abaixo da média.")
+                discount_msg = f"📉 *Desconto Real:* {discount_percent:.1f}% mais barato que a média recente!"
             else:
-                logger.info(f"❌ PROMOÇÃO BARRADA: {product_id} variação de preço fraca ({discount_percent:.1f}%).")
-                return False
+                logger.info(f"[Retido] {product_id} preço está normal (Variação: {discount_percent:.1f}%).")
+                return
         else:
-            # CORREÇÃO: Produto novo na base é aprovado direto para alimentar o banco e o canal!
-            logger.info(f"🌟 PROMOÇÃO APROVADA (Novo Radar): Produto {product_id} cadastrado na base de dados.")
-            discount_msg = "🌟 *Radar de Hardware Ativo!* Acompanhando variações de preço deste produto."
+            logger.info(f"🌟 NOVO RADAR: {product_id} adicionado ao monitoramento pela primeira vez.")
+            discount_msg = "🌟 *Radar de Preços Ativo!* Histórico de monitoramento iniciado para este item."
 
-        # 4. Geração do Link de Afiliado monetizado
-        affiliate_url = self.ali_client.generate_affiliate_link(original_url)
+        # 4. Monetização Estável
+        affiliate_url = self.ali_client.generate_affiliate_link(prod_data["url"])
 
-        # 5. Montagem do Template do Canal
-        message_text = f"""🛠️ *{title}*
+        # 5. Template Profissional e Limpo
+        message_text = f"""🛠️ *{prod_data['title']}*
 
-💰 Preço Agora: *{price_str}*
+💰 Preço Atual: *{prod_data['price']}*
 {discount_msg}
 
-🔌 *Categoria:* Hardware, Tecnologia & Utensílios
+🔌 *Nicho:* Hardware, Tecnologia & Gadgets
 
-🛒 Compre com segurança pelo link de afiliado:
-[Clique aqui para abrir no AliExpress]({affiliate_url})
+🛒 Compre com segurança pelo Link de Afiliado Oficial:
+[Clique aqui para abrir a Oferta no AliExpress]({affiliate_url})
 
-⚠️ *Nota:* Estoques promocionais esgotam rápido. O preço pode alterar a qualquer momento!"""
+⚠️ *Nota:* Os estoques promocionais da plataforma esgotam rápido e flutuam sem aviso prévio!"""
 
-        # 6. Disparo Seguro para o Canal do Telegram
+        # 6. Despacho Seguro
         try:
-            if image_url:
-                await self.telegram_bot.send_photo(chat_id=self.chat_id, photo=image_url, caption=message_text, parse_mode='Markdown')
+            if prod_data.get("image"):
+                await self.telegram_bot.send_photo(chat_id=self.chat_id, photo=prod_data["image"], caption=message_text, parse_mode='Markdown')
             else:
-                await self.telegram_bot.send_message(chat_id=self.chat_id, text=message_text, parse_mode='Markdown', disable_web_page_preview=False)
+                await self.telegram_bot.send_message(chat_id=self.chat_id, text=message_text, parse_mode='Markdown')
             
-            # Registra na tabela de postados para travar repetições futuras
-            self.db.save_posted_offer(product_id, title, affiliate_url)
-            logger.info(f"[Sucesso] Produto {product_id} integrado e publicado.")
-            return True
-
+            self.db.save_posted_offer(product_id, prod_data['title'], affiliate_url)
+            logger.info(f"✅ [Sucesso] Post enviado com sucesso para o Telegram para o produto {product_id}.")
         except Exception as e:
-            logger.error(f"Erro ao disparar mensagem para o Telegram: {e}")
-            return False
+            logger.error(f"Falha crítica no envio para o Telegram: {e}")
 
 def run_mock_server():
-    """Mantém a porta aberta exigida pelo Render."""
     port = int(os.getenv('PORT', 10000))
     handler = http.server.SimpleHTTPRequestHandler
     try:
@@ -115,31 +114,22 @@ def run_mock_server():
 
 async def main():
     bot = OffersBot()
-    logger.info("Bot de Ofertas Inteligente (Correção de Fluxo) ativado no Render!")
+    logger.info("Bot de Ofertas Inteligente V3 (Ultra-Estável) Iniciado!")
     
     while True:
         try:
-            logger.info("Iniciando ciclo automático de verificação de radar...")
+            logger.info("Iniciando varredura cíclica de IDs monitorados...")
+            product_ids = bot.ali_client.get_target_product_ids()
             
-            # Puxa a lista mapeada do módulo do AliExpress
-            lista_produtos = bot.ali_client.get_monitored_products()
-            
-            for prod in lista_produtos:
-                await bot.post_new_offer(
-                    product_id=prod["id"],
-                    title=prod["title"],
-                    original_url=prod["url"],
-                    price_str=prod["price"],
-                    image_url=prod["image"]
-                )
-                # Pequeno intervalo para respeitar o limite das APIs
-                await asyncio.sleep(2)
-            
-            logger.info("Varredura concluída com sucesso. Aguardando 5 minutos para o próximo ciclo...")
+            for pid in product_ids:
+                await bot.process_product_pipeline(pid)
+                # Aumentado para 4 segundos para evitar punições por excesso de requisições (Anti-Throttling)
+                await asyncio.sleep(4)
+                
+            logger.info("Ciclo encerrado. Aguardando 5 minutos para a próxima checagem de preços...")
             await asyncio.sleep(300)
-            
         except Exception as e:
-            logger.error(f"Erro no loop principal: {e}")
+            logger.error(f"Erro crítico no loop principal do bot: {e}")
             await asyncio.sleep(60)
 
 if __name__ == "__main__":
