@@ -1,14 +1,12 @@
 import logging
 import httpx
-import json
-import re
+import hashlib
+import datetime
 import urllib.parse
-from fake_useragent import UserAgent
 from dataclasses import dataclass
+from config import Config
 
 logger = logging.getLogger(__name__)
-# Rotação de User-Agent agressiva para simular navegadores reais
-ua = UserAgent(fallback="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0 Safari/537.36")
 
 @dataclass
 class Product:
@@ -27,146 +25,146 @@ class Product:
 
 class AliExpressClient:
     def __init__(self):
-        # A nova rota acessa a página WEB ao invés da API cega para evitar o bloqueio (404) do Firewall
-        self.base_url = "https://pt.aliexpress.com/w/wholesale-{}.html"
+        # Endpoint unificado de chamadas de API do AliExpress
+        self.endpoint = "https://api-sg.aliexpress.com/sync"
+        self.app_key = Config.ALI_KEY
+        self.secret = Config.ALI_SECRET
+        self.tracking_id = Config.ALI_TRACKING_ID
+
+    def _sign_request(self, params: dict) -> str:
+        """ 
+        Algoritmo Oficial de Assinatura (Signature) do AliExpress TopClient.
+        Concatena o Secret com os parâmetros ordenados alfabeticamente e gera um Hash MD5.
+        """
+        sorted_keys = sorted(params.keys())
+        sign_str = self.secret + "".join(f"{k}{params[k]}" for k in sorted_keys) + self.secret
+        return hashlib.md5(sign_str.encode('utf-8')).hexdigest().upper()
+
+    def _build_params(self, method: str, business_params: dict) -> dict:
+        """ Monta o payload padrão exigido pela plataforma """
+        params = {
+            "method": method,
+            "app_key": self.app_key,
+            "sign_method": "md5",
+            "timestamp": datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+            "v": "2.0",
+            "format": "json"
+        }
+        params.update(business_params)
+        params["sign"] = self._sign_request(params)
+        return params
 
     async def search_products(self, keyword: str):
-        headers = {
-            "User-Agent": ua.random,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-            "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
-            "Referer": "https://pt.aliexpress.com/",
-            "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1"
+        """ Busca os produtos usando a API Oficial (Zero Risco de Ban/404) """
+        method = "aliexpress.affiliate.product.query"
+        business_params = {
+            "keywords": keyword,
+            "target_currency": "BRL",
+            "target_language": "PT",
+            "tracking_id": self.tracking_id,
+            "sort": "SALE_PRICE_ASC" 
         }
         
-        # Formata a keyword ex: "Mouse Gamer" -> "Mouse-Gamer"
-        kw_slug = keyword.replace(" ", "-")
-        url = self.base_url.format(urllib.parse.quote(kw_slug)) + f"?SearchText={urllib.parse.quote_plus(keyword)}"
+        params = self._build_params(method, business_params)
         
-        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=15.0) as client:
             try:
-                response = await client.get(url, headers=headers)
+                # O Ali exige form-urlencoded para o envio dos parâmetros
+                response = await client.post(self.endpoint, data=params)
                 response.raise_for_status()
+                data = response.json()
                 
-                # Manda o HTML cru para o nosso extrator de estado
-                return self._parse_ssr_html(response.text, keyword)
-                
-            except httpx.HTTPStatusError as e:
-                logger.warning(f"⚠️ WAF bloqueou a página HTTP ({keyword}): Status {e.response.status_code}")
-                return []
-            except Exception as e:
-                logger.error(f"❌ Erro de conexão ao buscar {keyword}: {e}")
-                return []
-
-    def _extract_json_from_html(self, html: str):
-        """ Extrai o payload JSON renderizado no Servidor (SSR) embutido nas tags <script> """
-        # O Ali costuma jogar o payload de dados inteiro em uma destas variáveis globais JS:
-        markers = ["window._init_data_ = ", "window.runParams = ", "_init_data_ = "]
-        
-        for marker in markers:
-            if marker in html:
-                try:
-                    parts = html.split(marker, 1)
-                    json_str = parts[1].split("</script>")[0].strip()
+                # Tratamento de permissão negada caso sua conta não tenha sido aprovada ainda
+                if "error_response" in data:
+                    code = data["error_response"].get("code", "Erro Desconhecido")
+                    msg = data["error_response"].get("msg", "")
+                    logger.error(f"❌ API Oficial recusou o acesso ({code}): {msg}")
+                    return []
                     
-                    if json_str.endswith(";"):
-                        json_str = json_str[:-1]
-                        
-                    # Remove sujeira JS após o final do JSON
-                    idx = json_str.rfind('}')
-                    if idx != -1:
-                        json_str = json_str[:idx+1]
-                        
-                    return json.loads(json_str)
-                except Exception:
-                    continue
-        return None
+                return self._parse_api_response(data, keyword)
+                
+            except Exception as e:
+                logger.error(f"❌ Erro de conexão com a API Oficial ao buscar {keyword}: {e}")
+                return []
 
-    def _parse_ssr_html(self, html: str, keyword: str):
-        data = self._extract_json_from_html(html)
-        
-        if not data:
-            logger.warning(f"⚠️ Anti-Bot ativo: Não foi possível achar os dados da página para '{keyword}'. O bot vai tentar novamente no próximo ciclo.")
-            return []
-
+    def _parse_api_response(self, data: dict, keyword: str):
+        """ Faz o parse do JSON oficial retornando nossos objetos Product """
         results = []
         try:
-            items = []
-            
-            # Navega na hierarquia dos objetos JSON da Ali
-            if "data" in data and "root" in data["data"]:
-                items = data["data"]["root"].get("fields", {}).get("mods", {}).get("itemList", {}).get("content", [])
-            elif "mods" in data and "itemList" in data["mods"]:
-                items = data["mods"]["itemList"]["content"]
-            else:
-                logger.warning(f"⚠️ Estrutura de dados do Ali alterada para o nicho {keyword}")
-                return []
-
-            for item in items:
-                # Trata as variações dos testes A/B que a AliExpress faz no front-end
-                prod_info = item.get("item", item)
+            products = data.get("aliexpress_affiliate_product_query_response", {}) \
+                           .get("resp_result", {}) \
+                           .get("result", {}) \
+                           .get("products", {}) \
+                           .get("product", [])
+                           
+            for item in products:
+                prod_id = str(item.get("product_id", ""))
+                title = item.get("product_title", "")
                 
-                prod_id = str(prod_info.get("productId") or prod_info.get("itemId", ""))
-                if not prod_id:
-                    continue
-                
-                # -- TÍTULO --
-                title_obj = prod_info.get("title", {})
-                title = title_obj.get("displayTitle") if isinstance(title_obj, dict) else str(title_obj)
-                title = re.sub(r'<[^>]+>', '', title) # Limpa spans e strongs inseridos para highlight
-                
-                url = f"https://pt.aliexpress.com/item/{prod_id}.html"
-                
-                # -- IMAGEM --
-                img_obj = prod_info.get("image", {})
-                image = img_obj.get("imgUrl") if isinstance(img_obj, dict) else str(prod_info.get("imageUrl", ""))
-                if image and str(image).startswith("//"):
-                    image = "https:" + image
-                
-                # -- PREÇO --
-                prices_obj = prod_info.get("prices", {})
-                price_str = prices_obj.get("salePrice", {}).get("formattedPrice", "0") if isinstance(prices_obj, dict) else "0"
-                if price_str == "0":
-                    price_str = prod_info.get("price", "0")
+                # A grande vantagem da API: O link já vem monetizado no campo promotion_link!
+                url = item.get("promotion_link", item.get("product_url", ""))
+                image = item.get("product_main_image_url", "")
                 
                 try:
-                    clean_price = re.sub(r'[^\d,.]', '', str(price_str)).replace(",", ".")
-                    price = float(clean_price)
+                    price = float(item.get("target_sale_price", 0))
+                    sales = int(item.get("last_month_volume", 0))
+                    # A API as vezes retorna o rating como string. Ex: "4.8"
+                    rating_str = str(item.get("evaluate_rate", "0")).replace("%", "")
+                    rating = float(rating_str)
+                    
+                    # Correção se a API retornar percentual (ex: 98 em vez de 4.9)
+                    if rating > 5:
+                        rating = rating / 20.0 
                 except ValueError:
                     continue
-                
-                # -- VENDAS --
-                trade_obj = prod_info.get("trade", {})
-                sales_str = trade_obj.get("tradeDesc", "0") if isinstance(trade_obj, dict) else str(prod_info.get("sales", "0"))
-                sales_digits = re.sub(r'\D', '', sales_str)
-                sales = int(sales_digits) if sales_digits.isdigit() else 0
-                
-                # -- SCORE / ESTRELAS --
-                eval_obj = prod_info.get("evaluation", {})
-                rating = float(eval_obj.get("starRating", 0)) if isinstance(eval_obj, dict) else float(prod_info.get("rating", 0))
-
+                    
                 # 🛡️ FILTRO CORPORATIVO
-                if rating < 4.5 or sales < 100 or price <= 0:
+                if rating < 4.5 or sales < 50 or price <= 0:
                     continue
                 
                 score = (sales * (rating / 5.0))
                 
                 results.append(Product(
-                    id=prod_id, title=title, url=url, image=image, 
-                    price_value=price, sold_count=sales, rating=rating, 
+                    id=prod_id, title=title, url=url, image=image,
+                    price_value=price, sold_count=sales, rating=rating,
                     keyword=keyword, score=score
                 ))
                 
-            logger.info(f"✅ {len(results)} ofertas Premium filtradas (Score aprovado) para '{keyword}'")
+            logger.info(f"✅ {len(results)} ofertas extraídas via API Oficial para '{keyword}'")
             return sorted(results, key=lambda x: x.score, reverse=True)
-
+            
         except Exception as e:
-            logger.exception(f"❌ Falha ao processar as métricas para '{keyword}': {e}")
+            logger.error(f"Erro ao ler os dados da API Oficial: {e}")
             return []
 
     def generate_affiliate_link(self, product_url: str) -> str:
-        """ Implementação do Gerador Afiliado """
-        encoded_url = urllib.parse.quote_plus(product_url)
-        # Como ajustado anteriormente na API híbrida
-        return f"https://s.click.aliexpress.com/e/_dummy?url={encoded_url}"
+        """ 
+        Na API Oficial nova, o método product.query já retorna o link comissionado.
+        Mas mantemos este método ativo caso o bot tente repassar um link isolado.
+        """
+        method = "aliexpress.affiliate.link.generate"
+        business_params = {
+            "promotion_link_type": "0",
+            "source_values": product_url,
+            "tracking_id": self.tracking_id
+        }
+        params = self._build_params(method, business_params)
+        
+        # Mantido síncrono para não quebrar a estrutura do bot.py que você já tem rodando
+        with httpx.Client(timeout=10.0) as client:
+            try:
+                response = client.post(self.endpoint, data=params)
+                data = response.json()
+                
+                links = data.get("aliexpress_affiliate_link_generate_response", {}) \
+                            .get("resp_result", {}) \
+                            .get("result", {}) \
+                            .get("promoted_links", {}) \
+                            .get("promoted_link", [])
+                            
+                if links and len(links) > 0:
+                    return links[0].get("promotion_link", product_url)
+            except Exception as e:
+                logger.error(f"Erro ao forçar geração do link afiliado: {e}")
+                
+        return product_url
