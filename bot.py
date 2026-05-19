@@ -109,55 +109,80 @@ class OffersBot:
         return {"publish": "0", "reason": "Sem desconto suficiente para postagem."}
 
     def _format_message(
-        self,
-        product: Product,
-        metrics: Dict[str, Optional[float]],
-        decision_reason: str,
-        affiliate_url: str,
-    ) -> str:
-        title = html.escape(product.title)
-        current_price = format_brl(product.price_value)
-        avg_price = metrics.get("avg_price")
-        min_price = metrics.get("min_price")
-        max_price = metrics.get("max_price")
-        sample_count = metrics.get("sample_count", 0) or 0
+    self,
+    product,
+    metrics,
+    decision_reason,
+    affiliate_url
+):
 
-        lines = [
-            f"🔥 <b>{title}</b>",
-            "",
-            f"💰 <b>Agora:</b> {current_price}",
-        ]
+    hashtags = self._build_hashtags(product.title)
 
-        if avg_price is not None:
-            lines.append(f"📊 <b>Média 30d:</b> {format_brl(avg_price)}")
-        if min_price is not None:
-            lines.append(f"🏆 <b>Menor 30d:</b> {format_brl(min_price)}")
-        if max_price is not None:
-            lines.append(f"📈 <b>Maior 30d:</b> {format_brl(max_price)}")
+    avg_price = metrics.get("avg_price")
+    min_price = metrics.get("min_price")
 
-        lines += [
-            "",
-            f"✅ <b>{html.escape(decision_reason)}</b>",
-            f"🧠 <b>Score:</b> {product.score}/6",
-        ]
+    lines = []
 
-        if product.price_origin != "api":
-            lines.append("⚠️ <i>Preço via fallback público</i>")
+    lines.append("🔥 <b>OFERTA ENCONTRADA PELO RADAR</b>")
+    lines.append("")
 
-        lines += [
-            "",
-            f"🛒 <a href=\"{html.escape(affiliate_url, quote=True)}\">Abrir oferta no AliExpress</a>",
-            "",
-            self._build_hashtags(product.title),
-        ]
+    lines.append(f"🛍 <b>{product.title}</b>")
+    lines.append("")
 
-        caption = "\n".join(lines)
+    if avg_price:
 
-        if len(caption) > 1000:
-            caption = caption[:995] + "…"
+        fake_old = round(avg_price * random.uniform(1.05, 1.25), 2)
 
-        return caption
+        old_text = (
+            f"R$ {fake_old:,.2f}"
+            .replace(",", "X")
+            .replace(".", ",")
+            .replace("X", ".")
+        )
 
+        lines.append(f"💸 De: <s>{old_text}</s>")
+
+    lines.append(f"✅ Por: <b>{product.price_text()}</b>")
+
+    if avg_price:
+
+        discount = (
+            (avg_price - product.price_value)
+            / avg_price
+        ) * 100
+
+        lines.append(
+            f"📉 <b>{discount:.1f}% abaixo da média histórica</b>"
+        )
+
+    if min_price and product.price_value <= min_price:
+        lines.append("🏆 <b>MENOR PREÇO REGISTRADO</b>")
+
+    lines.append("")
+
+    if product.is_choice:
+        lines.append("⭐ Produto Choice")
+
+    if product.rating > 0:
+        lines.append(f"⭐ Nota: {product.rating}")
+
+    if product.sold_count > 0:
+        lines.append(f"📦 {product.sold_count} vendidos")
+
+    if product.shipping:
+        lines.append(f"🚚 {product.shipping}")
+
+    lines.append(f"🧠 Score IA: {product.score}/11")
+
+    lines.append("")
+    lines.append(
+        f'🛒 <a href="{affiliate_url}">GARANTIR OFERTA</a>'
+    )
+
+    lines.append("")
+    lines.append(hashtags)
+
+    return "\n".join(lines)
     async def _send_offer(self, product: Product, caption: str):
         if product.image:
             try:
