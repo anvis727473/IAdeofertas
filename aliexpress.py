@@ -107,17 +107,25 @@ class AliExpressClient:
             "User-Agent": random.choice(
                 Config.USER_AGENTS
             ),
+
             "Accept-Language": (
-                "pt-BR,pt;q=0.9"
+                "pt-BR,pt;q=0.9,en-US;q=0.8"
             ),
+
             "Accept": (
                 "text/html,"
                 "application/xhtml+xml,"
                 "application/xml;q=0.9,"
                 "image/avif,image/webp,*/*;q=0.8"
             ),
+
             "Cache-Control": "no-cache",
+
             "Pragma": "no-cache",
+
+            "Referer": "https://pt.aliexpress.com/",
+
+            "Upgrade-Insecure-Requests": "1",
         }
 
     def _generate_sign(
@@ -206,7 +214,7 @@ class AliExpressClient:
         except Exception:
 
             logger.exception(
-                "Erro gerar link afiliado"
+                "Erro gerar afiliado"
             )
 
             return original_url
@@ -307,7 +315,7 @@ class AliExpressClient:
                     time.sleep(
                         random.uniform(
                             1.0,
-                            2.2
+                            2.0
                         )
                     )
 
@@ -345,23 +353,34 @@ class AliExpressClient:
 
         html = response.text
 
-        data = self._extract_json_data(
+        if (
+            "captcha" in html.lower()
+            or "punish" in html.lower()
+        ):
+
+            logger.warning(
+                f"Bloqueio detectado: {product_id}"
+            )
+
+            return None
+
+        data = self._extract_product_data(
             html
         )
 
         if not data:
 
             logger.warning(
-                f"JSON não encontrado: {product_id}"
+                f"Dados não encontrados: {product_id}"
             )
 
             return None
 
-        title = self._extract_title(data)
+        title = data.get("title")
 
-        image = self._extract_image(data)
+        image = data.get("image")
 
-        price = self._extract_price(data)
+        price = data.get("price")
 
         if not title:
             return None
@@ -369,25 +388,27 @@ class AliExpressClient:
         if not image:
             return None
 
-        if price <= 0:
+        if not price:
             return None
 
-        sold_count = (
-            self._extract_sold(data)
+        sold_count = data.get(
+            "sold_count",
+            0
         )
 
-        rating = (
-            self._extract_rating(data)
+        rating = data.get(
+            "rating",
+            0.0
         )
 
-        shipping = (
-            self._extract_shipping(data)
+        shipping = data.get(
+            "shipping",
+            ""
         )
 
-        is_choice = (
-            self._detect_choice(
-                html
-            )
+        is_choice = data.get(
+            "is_choice",
+            False
         )
 
         product = Product(
@@ -411,20 +432,70 @@ class AliExpressClient:
 
         return product
 
-    def _extract_json_data(
+    def _extract_product_data(
         self,
         html: str
     ) -> Optional[Dict]:
 
+        title = self._extract_title_html(
+            html
+        )
+
+        image = self._extract_image_html(
+            html
+        )
+
+        price = self._extract_price_html(
+            html
+        )
+
+        sold_count = self._extract_sold_html(
+            html
+        )
+
+        rating = self._extract_rating_html(
+            html
+        )
+
+        is_choice = (
+            self._detect_choice(
+                html
+            )
+        )
+
+        if not title:
+            return None
+
+        if not image:
+            return None
+
+        if price <= 0:
+            return None
+
+        return {
+            "title": title,
+            "image": image,
+            "price": price,
+            "sold_count": sold_count,
+            "rating": rating,
+            "shipping": "Frete disponível",
+            "is_choice": is_choice,
+        }
+
+    def _extract_title_html(
+        self,
+        html: str
+    ) -> str:
+
         patterns = [
 
-            r'window.runParams\s*=\s*(\{.*?\});',
+            r'<title>(.*?)</title>',
 
-            r'window\.__INITIAL_STATE__\s*=\s*(\{.*?\});',
+            r'"subject":"(.*?)"',
 
-            r'window\._dida_config_._init_data_=\s*(\{.*?\});',
+            r'"title":"(.*?)"',
 
-            r'window\.rawData\s*=\s*(\{.*?\});'
+            r'property="og:title"\s+content="(.*?)"',
         ]
 
         for pattern in patterns:
@@ -434,261 +505,205 @@ class AliExpressClient:
                 match = re.search(
                     pattern,
                     html,
-                    re.S
+                    re.S | re.I
+                )
+
+                if match:
+
+                    title = (
+                        match.group(1)
+                        .replace("\\u0026", "&")
+                        .replace("&amp;", "&")
+                        .strip()
+                    )
+
+                    title = re.sub(
+                        r'\s+',
+                        ' ',
+                        title
+                    )
+
+                    if len(title) >= 10:
+                        return title
+
+            except Exception:
+                continue
+
+        return ""
+
+    def _extract_image_html(
+        self,
+        html: str
+    ) -> str:
+
+        patterns = [
+
+            r'property="og:image"\s+content="(.*?)"',
+
+            r'"imagePathList":\["(.*?)"',
+
+            r'"imageUrl":"(.*?)"',
+
+            r'"image":"(https://.*?)"',
+        ]
+
+        for pattern in patterns:
+
+            try:
+
+                match = re.search(
+                    pattern,
+                    html,
+                    re.S | re.I
+                )
+
+                if match:
+
+                    image = (
+                        match.group(1)
+                        .replace("\\/", "/")
+                    )
+
+                    if image.startswith("//"):
+                        image = "https:" + image
+
+                    return image
+
+            except Exception:
+                continue
+
+        return ""
+
+    def _extract_price_html(
+        self,
+        html: str
+    ) -> float:
+
+        patterns = [
+
+            r'"formatedActivityPrice":"([^"]+)"',
+
+            r'"formatedPrice":"([^"]+)"',
+
+            r'"salePrice":"([^"]+)"',
+
+            r'R\$\s?([\d.,]+)',
+        ]
+
+        for pattern in patterns:
+
+            try:
+
+                match = re.search(
+                    pattern,
+                    html,
+                    re.S | re.I
                 )
 
                 if not match:
                     continue
 
-                raw_json = (
-                    match.group(1)
-                    .strip()
-                )
+                value = match.group(1)
 
-                data = json.loads(
-                    raw_json
-                )
-
-                if isinstance(data, dict):
-                    return data
-
-            except Exception:
-                continue
-
-        return None
-
-    def _safe_get(
-        self,
-        data,
-        keys
-    ):
-
-        current = data
-
-        for key in keys:
-
-            if isinstance(current, dict):
-
-                current = current.get(key)
-
-            else:
-
-                return None
-
-        return current
-
-    def _extract_title(
-        self,
-        data: Dict
-    ) -> str:
-
-        paths = [
-
-            ["titleModule", "subject"],
-
-            ["metaDataComponent", "title"],
-
-            ["pageModule", "title"],
-
-            ["productInfoComponent", "subject"]
-        ]
-
-        for path in paths:
-
-            value = self._safe_get(
-                data,
-                path
-            )
-
-            if value:
-
-                return str(value).strip()
-
-        return ""
-
-    def _extract_image(
-        self,
-        data: Dict
-    ) -> str:
-
-        paths = [
-
-            ["imageModule", "imagePathList"],
-
-            ["imageModule", "images"],
-
-            ["imageModule", "imageURLs"]
-        ]
-
-        for path in paths:
-
-            value = self._safe_get(
-                data,
-                path
-            )
-
-            if (
-                isinstance(value, list)
-                and value
-            ):
-
-                image = str(value[0])
-
-                if image.startswith("//"):
-                    image = "https:" + image
-
-                return image
-
-        return ""
-
-    def _extract_price(
-        self,
-        data: Dict
-    ) -> float:
-
-        paths = [
-
-            ["priceModule", "formatedActivityPrice"],
-
-            ["priceModule", "formatedPrice"],
-
-            ["priceModule", "minActivityAmount"],
-
-            ["priceModule", "minAmount"],
-
-            ["priceComponent", "discountPrice"]
-        ]
-
-        for path in paths:
-
-            value = self._safe_get(
-                data,
-                path
-            )
-
-            if not value:
-                continue
-
-            try:
-
-                number = re.sub(
+                value = re.sub(
                     r"[^\d,.]",
                     "",
-                    str(value)
+                    value
                 )
 
-                number = (
-                    number
+                value = (
+                    value
                     .replace(".", "")
                     .replace(",", ".")
                 )
 
-                return float(number)
+                price = float(value)
+
+                if price > 0:
+                    return price
 
             except Exception:
                 continue
 
         return 0.0
 
-    def _extract_sold(
+    def _extract_sold_html(
         self,
-        data: Dict
+        html: str
     ) -> int:
 
-        paths = [
+        patterns = [
 
-            ["tradeComponent", "formatTradeCount"],
+            r'"tradeCount":"(\d+)"',
 
-            ["tradeComponent", "tradeCount"],
+            r'"formatTradeCount":"([^"]+)"',
 
-            ["titleModule", "formatTradeCount"]
+            r'(\d+)\s+vendidos',
         ]
 
-        for path in paths:
-
-            value = self._safe_get(
-                data,
-                path
-            )
-
-            if not value:
-                continue
-
-            digits = re.sub(
-                r"[^\d]",
-                "",
-                str(value)
-            )
-
-            if digits:
-
-                try:
-                    return int(digits)
-                except Exception:
-                    pass
-
-        return 0
-
-    def _extract_rating(
-        self,
-        data: Dict
-    ) -> float:
-
-        paths = [
-
-            ["titleModule", "feedbackRating"],
-
-            ["feedbackComponent", "evarageStar"],
-
-            ["feedbackComponent", "averageStar"]
-        ]
-
-        for path in paths:
-
-            value = self._safe_get(
-                data,
-                path
-            )
-
-            if not value:
-                continue
+        for pattern in patterns:
 
             try:
 
-                return float(
-                    str(value)
-                    .replace(",", ".")
+                match = re.search(
+                    pattern,
+                    html,
+                    re.S | re.I
                 )
+
+                if match:
+
+                    digits = re.sub(
+                        r"[^\d]",
+                        "",
+                        match.group(1)
+                    )
+
+                    if digits:
+                        return int(digits)
+
+            except Exception:
+                continue
+
+        return 0
+
+    def _extract_rating_html(
+        self,
+        html: str
+    ) -> float:
+
+        patterns = [
+
+            r'"averageStar":"([^"]+)"',
+
+            r'"feedbackRating":"([^"]+)"',
+
+            r'([\d.]+)\s+estrelas',
+        ]
+
+        for pattern in patterns:
+
+            try:
+
+                match = re.search(
+                    pattern,
+                    html,
+                    re.S | re.I
+                )
+
+                if match:
+
+                    rating = float(
+                        match.group(1)
+                        .replace(",", ".")
+                    )
+
+                    return rating
 
             except Exception:
                 continue
 
         return 0.0
-
-    def _extract_shipping(
-        self,
-        data: Dict
-    ) -> str:
-
-        paths = [
-
-            [
-                "webGeneralFreightCalculateComponent",
-                "originalLayoutResultList"
-            ]
-        ]
-
-        for path in paths:
-
-            value = self._safe_get(
-                data,
-                path
-            )
-
-            if value:
-                return "Frete disponível"
-
-        return ""
 
     def _detect_choice(
         self,
