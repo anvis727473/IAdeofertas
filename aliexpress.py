@@ -2,7 +2,6 @@ import time
 import hashlib
 import requests
 import logging
-import re
 from config import Config
 
 logger = logging.getLogger(__name__)
@@ -24,8 +23,67 @@ class AliExpressClient:
         sign_str += self.secret
         return hashlib.md5(sign_str.encode('utf-8')).hexdigest().upper()
 
+    def discover_niche_products(self) -> list:
+        """
+        BUSCA AUTOMÁTICA: Explora o feed de produtos mais vendidos (Hot Products)
+        filtrando por categorias de tecnologia/ferramentas e destino Brasil.
+        """
+        # IDs de Categorias Oficiais: 44 = Eletrônicos/Hardware, 1421 = Ferramentas/Utensílios
+        category_ids = "44,1421" 
+        
+        params = {
+            "method": "aliexpress.affiliate.hotproduct.query",
+            "app_key": self.app_key,
+            "timestamp": str(int(time.time() * 1000)),
+            "format": "json",
+            "v": "2.0",
+            "sign_method": "md5",
+            "category_ids": category_ids,
+            "target_currency": "BRL",
+            "target_language": "PT",
+            "ship_to_country": "BR", # Garante produtos que enviam para o Brasil
+            "page_size": "20"        # Busca 20 produtos por ciclo
+        }
+        params["sign"] = self._generate_sign(params)
+
+        discovered_products = []
+        try:
+            response = requests.get(self.api_url, params=params, timeout=15)
+            data = response.json()
+            
+            result = data.get("aliexpress_affiliate_hotproduct_query_response", {}).get("resp_result", {})
+            if result.get("code") == 200:
+                products = result.get("result", {}).get("products", {}).get("product", [])
+                
+                if isinstance(products, dict):
+                    products = [products]
+
+                for prod in products:
+                    # FILTRO DE CONFIANÇA: Só aceita produtos bem avaliados e com vendas
+                    evaluate_rate = float(prod.get("evaluate_rate", 0))
+                    volume = int(prod.get("first_level_order_count", 0)) # Vendas recentes
+                    
+                    if evaluate_rate >= 4.5 and volume > 10: # Filtro rígido de qualidade
+                        discovered_products.append({
+                            "id": str(prod.get("product_id")),
+                            "title": prod.get("product_title"),
+                            "url": prod.get("product_detail_url"),
+                            "price": f"R$ {prod.get('target_sale_price')}",
+                            "image": prod.get("product_main_image_url"),
+                            "rating": evaluate_rate
+                        })
+                
+                logger.info(f"Garimpo concluído: {len(discovered_products)} produtos confiáveis encontrados.")
+                return discovered_products
+                
+            logger.error(f"Erro ao garimpar produtos no AliExpress: {data}")
+            return []
+        except Exception as e:
+            logger.error(f"Falha de conexão no endpoint de garimpo: {e}")
+            return []
+
     def generate_affiliate_link(self, original_url: str) -> str:
-        """Converte um link normal em link de afiliado monetizado."""
+        """Converte o link do produto descoberto em link monetizado."""
         params = {
             "method": "aliexpress.affiliate.link.generate",
             "app_key": self.app_key,
@@ -50,57 +108,3 @@ class AliExpressClient:
         except Exception as e:
             logger.error(f"Erro ao gerar link de afiliado: {e}")
             return original_url
-
-    def fetch_live_product_details(self, product_id: str) -> dict:
-        """
-        APRIMORAMENTO: Busca o preço real, título e imagem direto da API do AliExpress.
-        Elimina a necessidade de colocar preços fixos no código.
-        """
-        params = {
-            "method": "aliexpress.affiliate.product.detail.get",
-            "app_key": self.app_key,
-            "timestamp": str(int(time.time() * 1000)),
-            "format": "json",
-            "v": "2.0",
-            "sign_method": "md5",
-            "product_ids": product_id,
-            "target_currency": "BRL",
-            "target_language": "PT"
-        }
-        params["sign"] = self._generate_sign(params)
-
-        try:
-            response = requests.get(self.api_url, params=params, timeout=12)
-            data = response.json()
-            
-            result = data.get("aliexpress_affiliate_product_detail_get_response", {}).get("resp_result", {})
-            if result.get("code") == 200:
-                products = result.get("result", {}).get("products", {}).get("product", [])
-                if products:
-                    prod = products[0]
-                    return {
-                        "id": product_id,
-                        "title": prod.get("product_title"),
-                        "url": prod.get("product_detail_url"),
-                        "price": f"R$ {prod.get('target_sale_price')}", 
-                        "image": prod.get("product_main_image_url"),
-                        "success": True
-                    }
-            logger.warning(f"Não foi possível obter detalhes reais para o ID {product_id}. Resposta: {data}")
-            return {"success": False}
-        except Exception as e:
-            logger.error(f"Falha de conexão ao obter detalhes do produto {product_id}: {e}")
-            return {"success": False}
-
-    def get_target_product_ids(self) -> list:
-        """
-        MELHORIA: Lista de IDs de PRODUTOS REAIS e altamente desejados no Brasil.
-        O bot vai usar esses IDs para buscar os dados atualizados dinamicamente.
-        """
-        return [
-            "1005005963503541",  # SSD NVMe Fanxiang S500 Pro
-            "1005006093855502",  # Roteador Xiaomi AX3000T
-            "1005005118556412",  # Parafusadeira Elétrica Xiaomi Mijia
-            "1005006001097262",  # Fone de Ouvido Anker Soundcore Q20i
-            "1005006161474962"   # Carregador Baseus 65W GaN Fast Charger
-        ]
