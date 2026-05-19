@@ -1,5 +1,16 @@
-python-telegram-bot==21.6
-psycopg2-binary==2.9.10
-requests==2.32.3
-python-dotenv==1.0.1
-urllib3==2.2.3
+# --- VARIÁVEIS DE AMBIENTE ---
+python-dotenv>=1.0.0
+
+# --- BANCO DE DADOS (Assíncrono) ---
+asyncpg>=0.29.0
+
+# --- REQUISIÇÕES WEB E SCRAPING ---
+httpx>=0.27.0
+fake-useragent>=1.5.0
+
+# --- SERVIDOR WEB (Health Check do Render) ---
+aiohttp>=3.9.3
+
+# --- TELEGRAM BOT ---
+# Usando a versão 20+ que possui suporte nativo a asyncio
+python-telegram-bot>=20.8
