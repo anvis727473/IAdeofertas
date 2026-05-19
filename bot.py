@@ -1,3 +1,5 @@
+# bot.py
+
 import asyncio
 import gc
 import html
@@ -11,7 +13,7 @@ from typing import Dict, Optional
 
 from telegram import Bot
 
-from aliexpress import AliExpressClient, Product, format_brl
+from aliexpress import AliExpressClient, Product
 from config import Config
 from database import DatabaseManager
 
@@ -19,16 +21,28 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
+
 logger = logging.getLogger(__name__)
 
 
+def format_brl(value: float) -> str:
+    return (
+        f"R$ {value:,.2f}"
+        .replace(",", "X")
+        .replace(".", ",")
+        .replace("X", ".")
+    )
+
+
 def run_mock_server():
+
     port = int(os.getenv("PORT", Config.PORT))
 
     class HealthHandler(http.server.BaseHTTPRequestHandler):
+
         def do_GET(self):
             self.send_response(200)
-            self.send_header("Content-type", "text/plain; charset=utf-8")
+            self.send_header("Content-type", "text/plain")
             self.end_headers()
             self.wfile.write(b"OK")
 
@@ -36,18 +50,25 @@ def run_mock_server():
             return
 
     try:
+
         with socketserver.TCPServer(("", port), HealthHandler) as httpd:
+            logger.info(f"Health server iniciado na porta {port}")
             httpd.serve_forever()
-    except Exception:
-        pass
+
+    except Exception as e:
+        logger.error(f"Erro health server: {e}")
 
 
 class OffersBot:
+
     def __init__(self):
+
         Config.validate()
 
         self.telegram_bot = Bot(token=Config.TELEGRAM_TOKEN)
+
         self.db = DatabaseManager()
+
         self.ali_client = AliExpressClient()
 
         try:
@@ -56,225 +77,326 @@ class OffersBot:
             self.chat_id = Config.ID_DO_GRUPO
 
     def _build_hashtags(self, title: str) -> str:
-        base = ["#AliExpress", "#Oferta", "#Promoção"]
-        t = title.lower()
 
-        if "ssd" in t or "nvme" in t:
-            base += ["#SSD", "#Hardware"]
-        if "teclado" in t:
-            base += ["#Teclado", "#Gamer"]
-        if "mouse" in t:
-            base += ["#Mouse", "#Gamer"]
-        if "xiaomi" in t:
-            base += ["#Xiaomi", "#Tech"]
-        if "baseus" in t:
-            base += ["#Baseus", "#Acessórios"]
-        if "hub" in t or "dock" in t:
-            base += ["#USB", "#Tech"]
+        title_lower = title.lower()
 
-        unique = list(dict.fromkeys(base))
-        return " ".join(unique)
+        tags = [
+            "#AliExpress",
+            "#Oferta",
+            "#Promoção"
+        ]
 
-    def _price_change_percent(self, avg_price: Optional[float], current_price: float) -> Optional[float]:
-        if not avg_price or avg_price <= 0:
-            return None
-        return ((avg_price - current_price) / avg_price) * 100.0
+        if "ssd" in title_lower:
+            tags.append("#SSD")
 
-    def _should_publish(self, product: Product, metrics: Dict[str, Optional[float]]) -> Dict[str, str]:
-        current = product.price_value
+        if "nvme" in title_lower:
+            tags.append("#NVMe")
+
+        if "mouse" in title_lower:
+            tags.append("#MouseGamer")
+
+        if "teclado" in title_lower:
+            tags.append("#TecladoGamer")
+
+        if "xiaomi" in title_lower:
+            tags.append("#Xiaomi")
+
+        if "baseus" in title_lower:
+            tags.append("#Baseus")
+
+        if "smartwatch" in title_lower:
+            tags.append("#Smartwatch")
+
+        return " ".join(list(dict.fromkeys(tags)))
+
+    def _should_publish(
+        self,
+        product: Product,
+        metrics: Dict
+    ):
+
         avg_price = metrics.get("avg_price")
         min_price = metrics.get("min_price")
-        last_price = metrics.get("last_price")
-        sample_count = metrics.get("sample_count", 0) or 0
+        sample_count = metrics.get("sample_count", 0)
 
         if sample_count == 0:
-            return {"publish": "1", "reason": "Novo radar ativo: primeiro registro no histórico."}
+            return True, "🌟 Novo produto inserido no radar"
 
-        if product.source == "fallback" and product.price_origin == "estimated" and product.score < 3:
-            return {"publish": "0", "reason": "Fallback estimado com score baixo."}
+        if avg_price and avg_price > 0:
 
-        if min_price is not None and current <= min_price:
-            return {"publish": "1", "reason": "Menor preço já registrado nos últimos 30 dias."}
+            discount = (
+                (avg_price - product.price_value)
+                / avg_price
+            ) * 100
 
-        discount_percent = self._price_change_percent(avg_price, current)
-        if discount_percent is not None and discount_percent >= Config.DISCOUNT_THRESHOLD:
-            return {
-                "publish": "1",
-                "reason": f"{discount_percent:.1f}% abaixo da média histórica.",
-            }
+            if discount >= Config.DISCOUNT_THRESHOLD:
 
-        if last_price is not None and sample_count >= 3 and current <= (last_price * 0.96):
-            return {"publish": "1", "reason": "Queda recente detectada em relação à última coleta."}
+                return (
+                    True,
+                    f"📉 {discount:.1f}% abaixo da média histórica"
+                )
 
-        return {"publish": "0", "reason": "Sem desconto suficiente para postagem."}
+        if min_price and product.price_value <= min_price:
+
+            return (
+                True,
+                "🏆 Menor preço registrado"
+            )
+
+        return False, "Sem desconto relevante"
 
     def _format_message(
-    self,
-    product,
-    metrics,
-    decision_reason,
-    affiliate_url
-):
+        self,
+        product: Product,
+        metrics: Dict,
+        decision_reason: str,
+        affiliate_url: str
+    ):
 
-    hashtags = self._build_hashtags(product.title)
+        hashtags = self._build_hashtags(product.title)
 
-    avg_price = metrics.get("avg_price")
-    min_price = metrics.get("min_price")
+        avg_price = metrics.get("avg_price")
+        min_price = metrics.get("min_price")
 
-    lines = []
+        lines = []
 
-    lines.append("🔥 <b>OFERTA ENCONTRADA PELO RADAR</b>")
-    lines.append("")
-
-    lines.append(f"🛍 <b>{product.title}</b>")
-    lines.append("")
-
-    if avg_price:
-
-        fake_old = round(avg_price * random.uniform(1.05, 1.25), 2)
-
-        old_text = (
-            f"R$ {fake_old:,.2f}"
-            .replace(",", "X")
-            .replace(".", ",")
-            .replace("X", ".")
-        )
-
-        lines.append(f"💸 De: <s>{old_text}</s>")
-
-    lines.append(f"✅ Por: <b>{product.price_text()}</b>")
-
-    if avg_price:
-
-        discount = (
-            (avg_price - product.price_value)
-            / avg_price
-        ) * 100
+        lines.append("🔥 <b>OFERTA ENCONTRADA PELO RADAR</b>")
+        lines.append("")
 
         lines.append(
-            f"📉 <b>{discount:.1f}% abaixo da média histórica</b>"
+            f"🛍 <b>{html.escape(product.title)}</b>"
         )
 
-    if min_price and product.price_value <= min_price:
-        lines.append("🏆 <b>MENOR PREÇO REGISTRADO</b>")
+        lines.append("")
 
-    lines.append("")
+        if avg_price:
 
-    if product.is_choice:
-        lines.append("⭐ Produto Choice")
+            fake_old = round(
+                avg_price * random.uniform(1.05, 1.25),
+                2
+            )
 
-    if product.rating > 0:
-        lines.append(f"⭐ Nota: {product.rating}")
+            old_price = (
+                f"R$ {fake_old:,.2f}"
+                .replace(",", "X")
+                .replace(".", ",")
+                .replace("X", ".")
+            )
 
-    if product.sold_count > 0:
-        lines.append(f"📦 {product.sold_count} vendidos")
+            lines.append(f"💸 De: <s>{old_price}</s>")
 
-    if product.shipping:
-        lines.append(f"🚚 {product.shipping}")
+        lines.append(
+            f"✅ Por: <b>{product.price_text()}</b>"
+        )
 
-    lines.append(f"🧠 Score IA: {product.score}/11")
+        if avg_price:
 
-    lines.append("")
-    lines.append(
-        f'🛒 <a href="{affiliate_url}">GARANTIR OFERTA</a>'
-    )
+            discount = (
+                (avg_price - product.price_value)
+                / avg_price
+            ) * 100
 
-    lines.append("")
-    lines.append(hashtags)
+            lines.append(
+                f"📉 <b>{discount:.1f}% abaixo da média histórica</b>"
+            )
 
-    return "\n".join(lines)
-    async def _send_offer(self, product: Product, caption: str):
-        if product.image:
-            try:
-                if len(caption) <= 900:
-                    await self.telegram_bot.send_photo(
-                        chat_id=self.chat_id,
-                        photo=product.image,
-                        caption=caption,
-                        parse_mode="HTML",
-                    )
-                    return
+        if min_price and product.price_value <= min_price:
+            lines.append("🏆 <b>MENOR PREÇO REGISTRADO</b>")
 
-                short_caption = f"🔥 <b>{html.escape(product.title[:80])}</b>\n💰 {format_brl(product.price_value)}"
+        lines.append("")
+
+        if product.is_choice:
+            lines.append("⭐ Produto Choice")
+
+        if product.rating > 0:
+            lines.append(f"⭐ Nota: {product.rating}")
+
+        if product.sold_count > 0:
+            lines.append(f"📦 {product.sold_count} vendidos")
+
+        if product.shipping:
+            lines.append(f"🚚 {product.shipping}")
+
+        lines.append(
+            f"🧠 Score IA: {product.score}/11"
+        )
+
+        lines.append("")
+        lines.append(
+            f'🛒 <a href="{affiliate_url}">GARANTIR OFERTA</a>'
+        )
+
+        lines.append("")
+        lines.append(hashtags)
+
+        return "\n".join(lines)
+
+    async def _send_offer(
+        self,
+        product: Product,
+        message: str
+    ):
+
+        try:
+
+            if product.image:
+
                 await self.telegram_bot.send_photo(
                     chat_id=self.chat_id,
                     photo=product.image,
-                    caption=short_caption,
-                    parse_mode="HTML",
+                    caption=message,
+                    parse_mode="HTML"
                 )
+
+            else:
+
                 await self.telegram_bot.send_message(
                     chat_id=self.chat_id,
-                    text=caption,
+                    text=message,
                     parse_mode="HTML",
-                    disable_web_page_preview=True,
+                    disable_web_page_preview=False
                 )
-                return
-            except Exception as e:
-                logger.warning(f"Falha ao enviar foto, fallback para texto: {e}")
 
-        await self.telegram_bot.send_message(
-            chat_id=self.chat_id,
-            text=caption,
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-        )
+        except Exception as e:
+            logger.exception(f"Erro Telegram: {e}")
 
-    async def process_product(self, product: Product):
-        if not product.id or product.price_value <= 0:
-            return
-
-        if self.db.has_recent_post(product.id, Config.REPOST_COOLDOWN_DAYS):
-            logger.info(f"Produto em cooldown: {product.id}")
-            return
-
-        metrics = self.db.get_price_metrics(product.id)
-
-        product_dict = product.to_dict()
-        self.db.save_price_sample(product_dict)
-
-        decision = self._should_publish(product, metrics)
-        if decision["publish"] != "1":
-            logger.info(f"Produto ignorado {product.id}: {decision['reason']}")
-            return
-
-        affiliate_url = self.ali_client.generate_affiliate_link(product.url)
-        caption = self._format_message(product, metrics, decision["reason"], affiliate_url)
+    async def process_product(
+        self,
+        product: Product
+    ):
 
         try:
-            await self._send_offer(product, caption)
-            self.db.register_post(product_dict, affiliate_url)
-            logger.info(f"Post enviado com sucesso: {product.id}")
+
+            if not product.id:
+                return
+
+            if product.price_value <= 0:
+                return
+
+            if self.db.has_recent_post(
+                product.id,
+                Config.REPOST_COOLDOWN_DAYS
+            ):
+                logger.info(f"Cooldown ativo: {product.id}")
+                return
+
+            metrics = self.db.get_price_metrics(product.id)
+
+            self.db.save_price_sample(product.to_dict())
+
+            should_publish, reason = self._should_publish(
+                product,
+                metrics
+            )
+
+            if not should_publish:
+
+                logger.info(
+                    f"Produto ignorado: {product.id}"
+                )
+
+                return
+
+            affiliate_url = (
+                self.ali_client.generate_affiliate_link(
+                    product.url
+                )
+            )
+
+            message = self._format_message(
+                product,
+                metrics,
+                reason,
+                affiliate_url
+            )
+
+            await self._send_offer(
+                product,
+                message
+            )
+
+            self.db.register_post(
+                product.to_dict(),
+                affiliate_url
+            )
+
+            logger.info(
+                f"Oferta enviada: {product.id}"
+            )
+
         except Exception as e:
-            logger.exception(f"Erro ao enviar produto para o Telegram: {e}")
+            logger.exception(
+                f"Erro processando produto: {e}"
+            )
 
     async def run(self):
-        logger.info("Bot híbrido profissional ativo.")
+
+        logger.info("Bot profissional iniciado")
 
         while True:
-            try:
-                products = await asyncio.to_thread(self.ali_client.search_niche_products)
 
-                if products:
-                    for product in products[: Config.MAX_PRODUCTS_PER_CYCLE]:
-                        await self.process_product(product)
-                        await asyncio.sleep(Config.PRODUCT_DELAY_SECONDS + random.uniform(0.5, 2.0))
-                else:
-                    logger.info("Nenhum produto encontrado neste ciclo.")
+            try:
+
+                products = await asyncio.to_thread(
+                    self.ali_client.search_niche_products
+                )
+
+                if not products:
+
+                    logger.info(
+                        "Nenhum produto encontrado"
+                    )
+
+                    await asyncio.sleep(
+                        Config.LOOP_SLEEP_SECONDS
+                    )
+
+                    continue
+
+                logger.info(
+                    f"{len(products)} produtos encontrados"
+                )
+
+                for product in products[
+                    :Config.MAX_PRODUCTS_PER_CYCLE
+                ]:
+
+                    await self.process_product(product)
+
+                    await asyncio.sleep(
+                        Config.PRODUCT_DELAY_SECONDS
+                        + random.uniform(0.5, 1.5)
+                    )
 
                 gc.collect()
-                await asyncio.sleep(Config.LOOP_SLEEP_SECONDS)
+
+                await asyncio.sleep(
+                    Config.LOOP_SLEEP_SECONDS
+                )
 
             except Exception as e:
-                logger.exception(f"Erro no loop principal: {e}")
-                await asyncio.sleep(45)
+
+                logger.exception(
+                    f"Erro loop principal: {e}"
+                )
+
+                await asyncio.sleep(60)
 
 
 async def main():
+
     bot = OffersBot()
+
     await bot.run()
 
 
 if __name__ == "__main__":
-    server_thread = threading.Thread(target=run_mock_server, daemon=True)
+
+    server_thread = threading.Thread(
+        target=run_mock_server,
+        daemon=True
+    )
+
     server_thread.start()
+
     asyncio.run(main())
