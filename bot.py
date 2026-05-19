@@ -38,11 +38,10 @@ class OffersBot:
         self.ali_client = AliExpressClient()
         self.chat_id = Config.ID_DO_GRUPO
 
-    async def process_api_product(self, prod: dict):
-        """Avalia o produto vindo diretamente da busca da API."""
+    async def process_discovered_product(self, prod: dict):
+        """Gerencia a esteira de validação, gravação em banco e postagem no Telegram."""
         product_id = prod["id"]
         
-        # 1. Filtro Anti-Duplicidade do Canal
         if self.db.is_offer_posted(product_id):
             return
 
@@ -50,51 +49,49 @@ class OffersBot:
         if current_price_float <= 0:
             return
 
-        # 2. Registra o preço no banco e analisa histórico
+        # Consulta métricas históricas no PostgreSQL
         avg_price, _ = self.db.get_price_metrics(product_id)
         self.db.save_price_if_changed(product_id, current_price_float)
 
-        # 3. Análise de Desconto (Fase Warmup inclusa)
         discount_msg = ""
         if avg_price and avg_price > 0:
             discount_percent = ((avg_price - current_price_float) / avg_price) * 100
             
-            if discount_percent >= 8:
-                logger.info(f"🔥 PROMOÇÃO DETECTADA VIA API: {product_id} com {discount_percent:.1f}% de desconto.")
-                discount_msg = f"📉 *Desconto Real:* {discount_percent:.1f}% mais barato que a média recente!"
+            if discount_percent >= 6:  # Posta se o preço cair 6% ou mais em relação à média monitorada
+                logger.info(f"🔥 QUEDA RECONHECIDA: {product_id} com {discount_percent:.1f}% de desconto real.")
+                discount_msg = f"📉 *Desconto Real:* {discount_percent:.1f}% mais barato que a média registrada!"
             else:
-                return  # Preço normal, mantém apenas guardado no banco salvando o histórico
+                return
         else:
-            logger.info(f"🌟 NOVO ITEM CAPTURADO VIA API: {product_id} adicionado ao Radar.")
-            discount_msg = f"⭐ *Radar de Preço Ativo!* Item adicionado à nossa base de monitoramento autônomo."
+            # Fase de Aquecimento (Warmup): Registra na base e faz a postagem inicial do radar
+            logger.info(f"📦 ITEM INTEGRADO AO RADAR: ID {product_id}")
+            discount_msg = "🌟 *Radar Ativo:* Produto localizado pelo sistema e inserido no monitoramento de preços!"
 
-        # 4. Converte o link encontrado pela API para o seu Link de Afiliado
+        # Converte a URL do produto usando a API de links autorizada
         affiliate_url = self.ali_client.generate_affiliate_link(prod["url"])
 
-        # 5. Criação do Post
         message_text = f"""🛠️ *{prod['title']}*
 
-💰 Preço Encontrado: *{prod['price']}*
+💰 Preço Achado: *{prod['price']}*
 {discount_msg}
 
-🔌 *Nicho:* Tecnologia, Hardware & Gadgets
+🎯 *Filtro:* Produto verificado de forma autônoma nos servidores do AliExpress.
 
-🛒 Compre com segurança pelo Link Oficial de Afiliado:
+🛒 Compre com segurança pelo Link de Afiliado:
 [Clique aqui para abrir a Oferta no AliExpress]({affiliate_url})
 
-⚠️ *Nota:* Estoques e preços são dinâmicos e controlados diretamente pelas lojas no AliExpress."""
+⚠️ *Nota:* Os estoques promocionais são limitados e variam com frequência."""
 
-        # 6. Envio para o Telegram
         try:
-            if prod.get("image"):
+            if prod.get("image") and "http" in prod["image"]:
                 await self.telegram_bot.send_photo(chat_id=self.chat_id, photo=prod["image"], caption=message_text, parse_mode='Markdown')
             else:
                 await self.telegram_bot.send_message(chat_id=self.chat_id, text=message_text, parse_mode='Markdown')
             
             self.db.save_posted_offer(product_id, prod['title'], affiliate_url)
-            logger.info(f"✅ Post enviado com sucesso para o produto: {product_id}")
+            logger.info(f"✅ Post enviado com sucesso: {product_id}")
         except Exception as e:
-            logger.error(f"Erro ao enviar post para o Telegram: {e}")
+            logger.error(f"Erro ao enviar postagem para o Telegram: {e}")
 
 def run_mock_server():
     port = int(os.getenv('PORT', 10000))
@@ -107,25 +104,24 @@ def run_mock_server():
 
 async def main():
     bot = OffersBot()
-    logger.info("Bot de Busca Dinâmica por API Iniciado com Sucesso!")
+    logger.info("Bot de Busca Geral V5 (Híbrido) Inicializado no Render!")
     
     while True:
         try:
-            # Chama o motor de busca geral da API do AliExpress
-            produtos_encontrados = bot.ali_client.search_niche_products_via_api()
+            # Executa a busca na API com o bypass inteligente acoplado
+            produtos = bot.ali_client.search_niche_products_via_api()
             
-            if produtos_encontrados:
-                logger.info(f"API retornou {len(produtos_encontrados)} produtos. Processando esteira...")
-                for produto in produtos_encontrados:
-                    await bot.process_api_product(produto)
-                    await asyncio.sleep(4)  # Anti-Throttling seguro
+            if produtos:
+                for item in produtos:
+                    await bot.process_discovered_product(item)
+                    await asyncio.sleep(5)  # Intervalo de segurança anti-bloqueio de IP
             else:
-                logger.warning("Nenhum produto retornado pela API neste ciclo. Tentando novamente no próximo.")
+                logger.warning("Nenhum produto coletado neste turno. Aguardando reajuste do ciclo.")
 
-            logger.info("Ciclo concluído. Aguardando 5 minutos para nova varredura de termos...")
+            logger.info("Varredura de nicho finalizada. Aguardando 5 minutos para o próximo ciclo...")
             await asyncio.sleep(300)
         except Exception as e:
-            logger.error(f"Erro no loop principal: {e}")
+            logger.error(f"Falha interna no loop principal: {e}")
             await asyncio.sleep(60)
 
 if __name__ == "__main__":
