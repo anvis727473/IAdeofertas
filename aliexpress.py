@@ -7,8 +7,8 @@ import random
 import re
 import time
 
-from dataclasses import dataclass, asdict, field
-from typing import Dict, List, Optional
+from dataclasses import dataclass, field, asdict
+from typing import List
 from urllib.parse import quote_plus
 
 import requests
@@ -27,18 +27,15 @@ class Product:
     id: str
     title: str
     url: str
-    price_value: float
     image: str
+    price_value: float
 
     sold_count: int = 0
     rating: float = 0.0
-    shipping: str = ""
 
     is_choice: bool = False
 
     score: int = 0
-
-    source: str = "fallback"
 
     raw: dict = field(default_factory=dict)
 
@@ -78,8 +75,6 @@ class AliExpressClient:
 
         retries = Retry(
             total=3,
-            connect=3,
-            read=3,
             backoff_factor=1,
             status_forcelist=[
                 429,
@@ -87,13 +82,13 @@ class AliExpressClient:
                 502,
                 503,
                 504
-            ],
+            ]
         )
 
         adapter = HTTPAdapter(
+            max_retries=retries,
             pool_connections=20,
-            pool_maxsize=20,
-            max_retries=retries
+            pool_maxsize=20
         )
 
         self.session.mount(
@@ -107,25 +102,12 @@ class AliExpressClient:
             "User-Agent": random.choice(
                 Config.USER_AGENTS
             ),
-
-            "Accept-Language": (
-                "pt-BR,pt;q=0.9,en-US;q=0.8"
-            ),
-
-            "Accept": (
-                "text/html,"
-                "application/xhtml+xml,"
-                "application/xml;q=0.9,"
-                "image/avif,image/webp,*/*;q=0.8"
-            ),
-
-            "Cache-Control": "no-cache",
-
-            "Pragma": "no-cache",
-
-            "Referer": "https://pt.aliexpress.com/",
-
-            "Upgrade-Insecure-Requests": "1",
+            "Accept-Language":
+                "pt-BR,pt;q=0.9,en;q=0.8",
+            "Accept":
+                "text/html,application/xhtml+xml",
+            "Referer":
+                "https://pt.aliexpress.com/",
         }
 
     def _generate_sign(
@@ -155,18 +137,29 @@ class AliExpressClient:
     ) -> str:
 
         params = {
-            "method": (
-                "aliexpress.affiliate.link.generate"
-            ),
-            "app_key": self.app_key,
-            "timestamp": str(
-                int(time.time() * 1000)
-            ),
-            "format": "json",
-            "v": "2.0",
-            "sign_method": "md5",
-            "source_values": original_url,
-            "tracking_id": self.tracking_id
+            "method":
+                "aliexpress.affiliate.link.generate",
+
+            "app_key":
+                self.app_key,
+
+            "timestamp":
+                str(int(time.time() * 1000)),
+
+            "format":
+                "json",
+
+            "v":
+                "2.0",
+
+            "sign_method":
+                "md5",
+
+            "source_values":
+                original_url,
+
+            "tracking_id":
+                self.tracking_id
         }
 
         params["sign"] = (
@@ -178,7 +171,7 @@ class AliExpressClient:
             response = self.session.get(
                 self.api_url,
                 params=params,
-                timeout=(5, 15)
+                timeout=15
             )
 
             data = response.json()
@@ -214,7 +207,7 @@ class AliExpressClient:
         except Exception:
 
             logger.exception(
-                "Erro gerar afiliado"
+                "Erro afiliado"
             )
 
             return original_url
@@ -231,18 +224,9 @@ class AliExpressClient:
             f"Garimpando keyword: {keyword}"
         )
 
-        return self._fallback_real_scraping(
-            keyword
-        )
-
-    def _fallback_real_scraping(
-        self,
-        keyword: str
-    ) -> List[Product]:
-
         url = (
             "https://pt.aliexpress.com/w/wholesale-"
-            f"{quote_plus(keyword.replace(' ', '-'))}.html"
+            f"{quote_plus(keyword)}.html"
         )
 
         try:
@@ -250,80 +234,20 @@ class AliExpressClient:
             response = self.session.get(
                 url,
                 headers=self._headers(),
-                timeout=(5, 20)
+                timeout=20
             )
 
             html = response.text
 
-            patterns = [
-
-                r'/item/(\d+)\.html',
-
-                r'"productId":"(\d+)"',
-
-                r'"itemId":"(\d+)"',
-
-                r'"product_id":"(\d+)"',
-
-                r'"tradeItemId":"(\d+)"',
-
-                r'"productId":(\d+)',
-
-                r'"itemId":(\d+)'
-            ]
-
-            ids = []
-
-            for pattern in patterns:
-
-                found = re.findall(
-                    pattern,
+            products = (
+                self._extract_products_from_html(
                     html
                 )
-
-                if found:
-                    ids.extend(found)
-
-            ids = list(dict.fromkeys(ids))
-
-            ids = [
-                pid for pid in ids
-                if len(pid) >= 8
-            ]
-
-            ids = ids[:10]
-
-            logger.info(
-                f"{len(ids)} IDs encontrados"
             )
 
-            products = []
-
-            for pid in ids:
-
-                try:
-
-                    product = (
-                        self._scrape_product_page(
-                            pid
-                        )
-                    )
-
-                    if product:
-                        products.append(product)
-
-                    time.sleep(
-                        random.uniform(
-                            1.0,
-                            2.0
-                        )
-                    )
-
-                except Exception as e:
-
-                    logger.warning(
-                        f"Erro produto {pid}: {e}"
-                    )
+            logger.info(
+                f"{len(products)} produtos encontrados"
+            )
 
             return products
 
@@ -335,396 +259,237 @@ class AliExpressClient:
 
             return []
 
-    def _scrape_product_page(
-        self,
-        product_id: str
-    ) -> Optional[Product]:
-
-        url = (
-            f"https://pt.aliexpress.com/item/"
-            f"{product_id}.html"
-        )
-
-        response = self.session.get(
-            url,
-            headers=self._headers(),
-            timeout=(5, 20)
-        )
-
-        html = response.text
-
-        if (
-            "captcha" in html.lower()
-            or "punish" in html.lower()
-        ):
-
-            logger.warning(
-                f"Bloqueio detectado: {product_id}"
-            )
-
-            return None
-
-        data = self._extract_product_data(
-            html
-        )
-
-        if not data:
-
-            logger.warning(
-                f"Dados não encontrados: {product_id}"
-            )
-
-            return None
-
-        title = data.get("title")
-
-        image = data.get("image")
-
-        price = data.get("price")
-
-        if not title:
-            return None
-
-        if not image:
-            return None
-
-        if not price:
-            return None
-
-        sold_count = data.get(
-            "sold_count",
-            0
-        )
-
-        rating = data.get(
-            "rating",
-            0.0
-        )
-
-        shipping = data.get(
-            "shipping",
-            ""
-        )
-
-        is_choice = data.get(
-            "is_choice",
-            False
-        )
-
-        product = Product(
-            id=product_id,
-            title=title,
-            url=url,
-            price_value=price,
-            image=image,
-            sold_count=sold_count,
-            rating=rating,
-            shipping=shipping,
-            is_choice=is_choice,
-            raw=data
-        )
-
-        product.score = (
-            self._calculate_score(
-                product
-            )
-        )
-
-        return product
-
-    def _extract_product_data(
+    def _extract_products_from_html(
         self,
         html: str
-    ) -> Optional[Dict]:
+    ) -> List[Product]:
 
-        title = self._extract_title_html(
+        found_products = []
+
+        seen = set()
+
+        product_pattern = re.finditer(
+            r'/item/(\d+)\.html',
             html
         )
 
-        image = self._extract_image_html(
-            html
-        )
-
-        price = self._extract_price_html(
-            html
-        )
-
-        sold_count = self._extract_sold_html(
-            html
-        )
-
-        rating = self._extract_rating_html(
-            html
-        )
-
-        is_choice = (
-            self._detect_choice(
-                html
-            )
-        )
-
-        if not title:
-            return None
-
-        if not image:
-            return None
-
-        if price <= 0:
-            return None
-
-        return {
-            "title": title,
-            "image": image,
-            "price": price,
-            "sold_count": sold_count,
-            "rating": rating,
-            "shipping": "Frete disponível",
-            "is_choice": is_choice,
-        }
-
-    def _extract_title_html(
-        self,
-        html: str
-    ) -> str:
-
-        patterns = [
-
-            r'<title>(.*?)</title>',
-
-            r'"subject":"(.*?)"',
-
-            r'"title":"(.*?)"',
-
-            r'property="og:title"\s+content="(.*?)"',
-        ]
-
-        for pattern in patterns:
+        for match in product_pattern:
 
             try:
 
-                match = re.search(
-                    pattern,
-                    html,
-                    re.S | re.I
+                product_id = match.group(1)
+
+                if product_id in seen:
+                    continue
+
+                seen.add(product_id)
+
+                start = max(
+                    0,
+                    match.start() - 2500
                 )
 
-                if match:
+                end = min(
+                    len(html),
+                    match.end() + 2500
+                )
 
-                    title = (
-                        match.group(1)
-                        .replace("\\u0026", "&")
-                        .replace("&amp;", "&")
-                        .strip()
+                block = html[start:end]
+
+                title = self._extract_title(
+                    block
+                )
+
+                image = self._extract_image(
+                    block
+                )
+
+                price = self._extract_price(
+                    block
+                )
+
+                sold = self._extract_sold(
+                    block
+                )
+
+                if not title:
+                    continue
+
+                if not image:
+                    continue
+
+                if price <= 0:
+                    continue
+
+                product_url = (
+                    "https://pt.aliexpress.com/item/"
+                    f"{product_id}.html"
+                )
+
+                product = Product(
+                    id=product_id,
+                    title=title,
+                    url=product_url,
+                    image=image,
+                    price_value=price,
+                    sold_count=sold,
+                    is_choice=(
+                        "choice" in block.lower()
                     )
+                )
 
-                    title = re.sub(
-                        r'\s+',
-                        ' ',
-                        title
+                product.score = (
+                    self._calculate_score(
+                        product
                     )
+                )
 
-                    if len(title) >= 10:
-                        return title
+                found_products.append(
+                    product
+                )
+
+                if len(found_products) >= 10:
+                    break
 
             except Exception:
                 continue
 
-        return ""
+        return found_products
 
-    def _extract_image_html(
+    def _extract_title(
         self,
-        html: str
+        text: str
     ) -> str:
 
         patterns = [
 
-            r'property="og:image"\s+content="(.*?)"',
+            r'"title":"([^"]+)"',
 
-            r'"imagePathList":\["(.*?)"',
+            r'"displayTitle":"([^"]+)"',
 
-            r'"imageUrl":"(.*?)"',
-
-            r'"image":"(https://.*?)"',
+            r'alt="([^"]+)"'
         ]
 
         for pattern in patterns:
 
-            try:
+            match = re.search(
+                pattern,
+                text,
+                re.I
+            )
 
-                match = re.search(
-                    pattern,
-                    html,
-                    re.S | re.I
+            if match:
+
+                title = (
+                    match.group(1)
+                    .replace("\\u0026", "&")
+                    .replace("&amp;", "&")
+                    .replace("\\", "")
+                    .strip()
                 )
 
-                if match:
-
-                    image = (
-                        match.group(1)
-                        .replace("\\/", "/")
-                    )
-
-                    if image.startswith("//"):
-                        image = "https:" + image
-
-                    return image
-
-            except Exception:
-                continue
+                if len(title) >= 10:
+                    return title
 
         return ""
 
-    def _extract_price_html(
+    def _extract_image(
         self,
-        html: str
+        text: str
+    ) -> str:
+
+        patterns = [
+
+            r'https://[^"]+\.(jpg|jpeg|png|webp)',
+
+            r'//[^"]+\.(jpg|jpeg|png|webp)'
+        ]
+
+        for pattern in patterns:
+
+            match = re.search(
+                pattern,
+                text,
+                re.I
+            )
+
+            if match:
+
+                image = match.group(0)
+
+                if image.startswith("//"):
+                    image = "https:" + image
+
+                return image
+
+        return ""
+
+    def _extract_price(
+        self,
+        text: str
     ) -> float:
 
         patterns = [
 
-            r'"formatedActivityPrice":"([^"]+)"',
-
-            r'"formatedPrice":"([^"]+)"',
-
-            r'"salePrice":"([^"]+)"',
-
             r'R\$\s?([\d.,]+)',
+
+            r'"price":"([\d.,]+)"',
+
+            r'"salePrice":"([\d.,]+)"'
         ]
 
         for pattern in patterns:
 
-            try:
+            match = re.search(
+                pattern,
+                text
+            )
 
-                match = re.search(
-                    pattern,
-                    html,
-                    re.S | re.I
-                )
+            if match:
 
-                if not match:
+                try:
+
+                    value = (
+                        match.group(1)
+                        .replace(".", "")
+                        .replace(",", ".")
+                    )
+
+                    return float(value)
+
+                except Exception:
                     continue
-
-                value = match.group(1)
-
-                value = re.sub(
-                    r"[^\d,.]",
-                    "",
-                    value
-                )
-
-                value = (
-                    value
-                    .replace(".", "")
-                    .replace(",", ".")
-                )
-
-                price = float(value)
-
-                if price > 0:
-                    return price
-
-            except Exception:
-                continue
 
         return 0.0
 
-    def _extract_sold_html(
+    def _extract_sold(
         self,
-        html: str
+        text: str
     ) -> int:
 
         patterns = [
 
-            r'"tradeCount":"(\d+)"',
-
-            r'"formatTradeCount":"([^"]+)"',
-
             r'(\d+)\s+vendidos',
+
+            r'"tradeCount":"(\d+)"'
         ]
 
         for pattern in patterns:
 
-            try:
+            match = re.search(
+                pattern,
+                text,
+                re.I
+            )
 
-                match = re.search(
-                    pattern,
-                    html,
-                    re.S | re.I
-                )
+            if match:
 
-                if match:
-
-                    digits = re.sub(
-                        r"[^\d]",
-                        "",
-                        match.group(1)
-                    )
-
-                    if digits:
-                        return int(digits)
-
-            except Exception:
-                continue
+                try:
+                    return int(match.group(1))
+                except Exception:
+                    pass
 
         return 0
-
-    def _extract_rating_html(
-        self,
-        html: str
-    ) -> float:
-
-        patterns = [
-
-            r'"averageStar":"([^"]+)"',
-
-            r'"feedbackRating":"([^"]+)"',
-
-            r'([\d.]+)\s+estrelas',
-        ]
-
-        for pattern in patterns:
-
-            try:
-
-                match = re.search(
-                    pattern,
-                    html,
-                    re.S | re.I
-                )
-
-                if match:
-
-                    rating = float(
-                        match.group(1)
-                        .replace(",", ".")
-                    )
-
-                    return rating
-
-            except Exception:
-                continue
-
-        return 0.0
-
-    def _detect_choice(
-        self,
-        html: str
-    ) -> bool:
-
-        html_lower = html.lower()
-
-        indicators = [
-
-            "choice",
-
-            "choice day",
-
-            "aliexpress choice"
-        ]
-
-        return any(
-            indicator in html_lower
-            for indicator in indicators
-        )
 
     def _calculate_score(
         self,
@@ -736,15 +501,6 @@ class AliExpressClient:
         if product.is_choice:
             score += 3
 
-        if product.rating >= 4.8:
-            score += 3
-
-        elif product.rating >= 4.5:
-            score += 2
-
-        elif product.rating >= 4.0:
-            score += 1
-
         if product.sold_count >= 5000:
             score += 3
 
@@ -755,9 +511,6 @@ class AliExpressClient:
             score += 1
 
         if product.price_value <= 150:
-            score += 1
-
-        if product.shipping:
             score += 1
 
         return score
