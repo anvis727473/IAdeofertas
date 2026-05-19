@@ -1,402 +1,137 @@
-# bot.py
-
 import asyncio
-import gc
-import html
-import http.server
 import logging
 import os
-import random
-import socketserver
-import threading
-from typing import Dict, Optional
+from aiohttp import web
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 
-from telegram import Bot
-
-from aliexpress import AliExpressClient, Product
 from config import Config
 from database import DatabaseManager
+from aliexpress import AliExpressClient
 
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO
 )
-
 logger = logging.getLogger(__name__)
 
-
-def format_brl(value: float) -> str:
-    return (
-        f"R$ {value:,.2f}"
-        .replace(",", "X")
-        .replace(".", ",")
-        .replace("X", ".")
-    )
-
-
-def run_mock_server():
-
-    port = int(os.getenv("PORT", Config.PORT))
-
-    class HealthHandler(http.server.BaseHTTPRequestHandler):
-
-        def do_GET(self):
-            self.send_response(200)
-            self.send_header("Content-type", "text/plain")
-            self.end_headers()
-            self.wfile.write(b"OK")
-
-        def log_message(self, format, *args):
-            return
-
-    try:
-
-        with socketserver.TCPServer(("", port), HealthHandler) as httpd:
-            logger.info(f"Health server iniciado na porta {port}")
-            httpd.serve_forever()
-
-    except Exception as e:
-        logger.error(f"Erro health server: {e}")
-
-
 class OffersBot:
-
     def __init__(self):
-
         Config.validate()
-
         self.telegram_bot = Bot(token=Config.TELEGRAM_TOKEN)
-
         self.db = DatabaseManager()
-
         self.ali_client = AliExpressClient()
+        self.chat_id = Config.ID_DO_GRUPO
 
-        try:
-            self.chat_id = int(Config.ID_DO_GRUPO)
-        except ValueError:
-            self.chat_id = Config.ID_DO_GRUPO
+    def _build_message(self, product, affiliate_url, is_price_drop=False):
+        stars = "⭐" * min(int(product.rating), 5)
+        
+        # Tag especial se houver queda de preço
+        header = "🚨 *ALERTA DE QUEDA DE PREÇO* 🚨" if is_price_drop else "🔥 *NOVA OFERTA ENCONTRADA*"
+        
+        return f"""
+{header}
 
-    def _build_hashtags(self, title: str) -> str:
+🛒 *{product.title}*
 
-        title_lower = title.lower()
+💰 *{product.price_text()}*
 
-        tags = [
-            "#AliExpress",
-            "#Oferta",
-            "#Promoção"
-        ]
+🔥 {product.sold_count} vendidos
+{stars} ({product.rating})
+🔎 Nicho: {product.keyword}
 
-        if "ssd" in title_lower:
-            tags.append("#SSD")
+👇 COMPRE AGORA (Link Seguro) 👇
+"""
 
-        if "nvme" in title_lower:
-            tags.append("#NVMe")
-
-        if "mouse" in title_lower:
-            tags.append("#MouseGamer")
-
-        if "teclado" in title_lower:
-            tags.append("#TecladoGamer")
-
-        if "xiaomi" in title_lower:
-            tags.append("#Xiaomi")
-
-        if "baseus" in title_lower:
-            tags.append("#Baseus")
-
-        if "smartwatch" in title_lower:
-            tags.append("#Smartwatch")
-
-        return " ".join(list(dict.fromkeys(tags)))
-
-    def _should_publish(
-        self,
-        product: Product,
-        metrics: Dict
-    ):
-
-        avg_price = metrics.get("avg_price")
-        min_price = metrics.get("min_price")
-        sample_count = metrics.get("sample_count", 0)
-
-        if sample_count == 0:
-            return True, "🌟 Novo produto inserido no radar"
-
-        if avg_price and avg_price > 0:
-
-            discount = (
-                (avg_price - product.price_value)
-                / avg_price
-            ) * 100
-
-            if discount >= Config.DISCOUNT_THRESHOLD:
-
-                return (
-                    True,
-                    f"📉 {discount:.1f}% abaixo da média histórica"
-                )
-
-        if min_price and product.price_value <= min_price:
-
-            return (
-                True,
-                "🏆 Menor preço registrado"
-            )
-
-        return False, "Sem desconto relevante"
-
-    def _format_message(
-        self,
-        product: Product,
-        metrics: Dict,
-        decision_reason: str,
-        affiliate_url: str
-    ):
-
-        hashtags = self._build_hashtags(product.title)
-
-        avg_price = metrics.get("avg_price")
-        min_price = metrics.get("min_price")
-
-        lines = []
-
-        lines.append("🔥 <b>OFERTA ENCONTRADA PELO RADAR</b>")
-        lines.append("")
-
-        lines.append(
-            f"🛍 <b>{html.escape(product.title)}</b>"
-        )
-
-        lines.append("")
-
-        if avg_price:
-
-            fake_old = round(
-                avg_price * random.uniform(1.05, 1.25),
-                2
-            )
-
-            old_price = (
-                f"R$ {fake_old:,.2f}"
-                .replace(",", "X")
-                .replace(".", ",")
-                .replace("X", ".")
-            )
-
-            lines.append(f"💸 De: <s>{old_price}</s>")
-
-        lines.append(
-            f"✅ Por: <b>{product.price_text()}</b>"
-        )
-
-        if avg_price:
-
-            discount = (
-                (avg_price - product.price_value)
-                / avg_price
-            ) * 100
-
-            lines.append(
-                f"📉 <b>{discount:.1f}% abaixo da média histórica</b>"
-            )
-
-        if min_price and product.price_value <= min_price:
-            lines.append("🏆 <b>MENOR PREÇO REGISTRADO</b>")
-
-        lines.append("")
-
-        if product.is_choice:
-            lines.append("⭐ Produto Choice")
-
-        if product.rating > 0:
-            lines.append(f"⭐ Nota: {product.rating}")
-
-        if product.sold_count > 0:
-            lines.append(f"📦 {product.sold_count} vendidos")
-
-        if product.shipping:
-            lines.append(f"🚚 {product.shipping}")
-
-        lines.append(
-            f"🧠 Score IA: {product.score}/11"
-        )
-
-        lines.append("")
-        lines.append(
-            f'🛒 <a href="{affiliate_url}">GARANTIR OFERTA</a>'
-        )
-
-        lines.append("")
-        lines.append(hashtags)
-
-        return "\n".join(lines)
-
-    async def _send_offer(
-        self,
-        product: Product,
-        message: str
-    ):
-
-        try:
-
-            if product.image:
-
-                await self.telegram_bot.send_photo(
-                    chat_id=self.chat_id,
-                    photo=product.image,
-                    caption=message,
-                    parse_mode="HTML"
-                )
-
+    async def process_product(self, product):
+        last_price = await self.db.get_last_price(product.id)
+        is_price_drop = False
+        
+        if last_price is not None:
+            # 📉 INTELIGÊNCIA: Se o preço atual for 15% MENOR que o histórico, reposta!
+            if product.price_value <= (last_price * 0.85):
+                is_price_drop = True
+                logger.info(f"📉 Queda de preço detectada: {product.id} (De {last_price} para {product.price_value})")
             else:
+                # Já foi postado e não teve queda significativa
+                return
 
-                await self.telegram_bot.send_message(
-                    chat_id=self.chat_id,
-                    text=message,
-                    parse_mode="HTML",
-                    disable_web_page_preview=False
-                )
-
-        except Exception as e:
-            logger.exception(f"Erro Telegram: {e}")
-
-    async def process_product(
-        self,
-        product: Product
-    ):
+        affiliate_url = self.ali_client.generate_affiliate_link(product.url)
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("🛒 Comprar Agora", url=affiliate_url)
+        ]])
+        message = self._build_message(product, affiliate_url, is_price_drop)
 
         try:
-
-            if not product.id:
-                return
-
-            if product.price_value <= 0:
-                return
-
-            if self.db.has_recent_post(
-                product.id,
-                Config.REPOST_COOLDOWN_DAYS
-            ):
-                logger.info(f"Cooldown ativo: {product.id}")
-                return
-
-            metrics = self.db.get_price_metrics(product.id)
-
-            self.db.save_price_sample(product.to_dict())
-
-            should_publish, reason = self._should_publish(
-                product,
-                metrics
+            await self.telegram_bot.send_photo(
+                chat_id=self.chat_id,
+                photo=product.image,
+                caption=message,
+                parse_mode="Markdown",
+                reply_markup=keyboard
             )
+            
+            # Persistência Assíncrona
+            await self.db.save_posted_offer(product)
+            await self.db.save_price(product.id, product.price_value)
+            
+            logger.info(f"✅ Produto enviado: {product.title}")
+            await asyncio.sleep(5)  # Respeita o rate limit do Telegram
+            
+        except Exception as e:
+            logger.error(f"❌ Erro Telegram ao enviar {product.id}: {e}")
 
-            if not should_publish:
 
-                logger.info(
-                    f"Produto ignorado: {product.id}"
-                )
+# --- HEALTH SERVER ASSÍNCRONO PARA O RENDER ---
+async def health_handler(request):
+    return web.Response(text="Bot Enterprise Operacional e Rodando! 🚀")
 
-                return
+async def start_health_server():
+    app = web.Application()
+    app.router.add_get('/', health_handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.getenv("PORT", 10000))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    logger.info(f"🌐 Health server aiohttp rodando na porta {port}")
 
-            affiliate_url = (
-                self.ali_client.generate_affiliate_link(
-                    product.url
-                )
-            )
 
-            message = self._format_message(
-                product,
-                metrics,
-                reason,
-                affiliate_url
-            )
+# --- LOOP PRINCIPAL ---
+async def main():
+    bot = OffersBot()
+    await bot.db.connect()
+    await start_health_server()
+    
+    logger.info("🚀 Bot Enterprise Iniciado com Sucesso!")
 
-            await self._send_offer(
-                product,
-                message
-            )
+    while True:
+        try:
+            keywords = await bot.db.get_active_keywords()
+            if not keywords:
+                logger.warning("Nenhum nicho ativo no banco. Aguardando...")
+                await asyncio.sleep(60)
+                continue
 
-            self.db.register_post(
-                product.to_dict(),
-                affiliate_url
-            )
+            for keyword in keywords:
+                logger.info(f"🔎 Garimpando nicho: {keyword}")
+                products = await bot.ali_client.search_products(keyword)
+                
+                # Pegar apenas os TOP 3 do nicho para evitar spam no grupo
+                top_products = products[:3] 
+                
+                for product in top_products:
+                    await bot.process_product(product)
+                
+                # Backoff / Sleep entre keywords para não engatilhar o Anti-Bot
+                await asyncio.sleep(15)
 
-            logger.info(
-                f"Oferta enviada: {product.id}"
-            )
+            # Ciclo de espera antes da próxima rodada completa
+            logger.info("💤 Ciclo finalizado. Descansando por 30 minutos...")
+            await asyncio.sleep(1800)
 
         except Exception as e:
-            logger.exception(
-                f"Erro processando produto: {e}"
-            )
-
-    async def run(self):
-
-        logger.info("Bot profissional iniciado")
-
-        while True:
-
-            try:
-
-                products = await asyncio.to_thread(
-                    self.ali_client.search_niche_products
-                )
-
-                if not products:
-
-                    logger.info(
-                        "Nenhum produto encontrado"
-                    )
-
-                    await asyncio.sleep(
-                        Config.LOOP_SLEEP_SECONDS
-                    )
-
-                    continue
-
-                logger.info(
-                    f"{len(products)} produtos encontrados"
-                )
-
-                for product in products[
-                    :Config.MAX_PRODUCTS_PER_CYCLE
-                ]:
-
-                    await self.process_product(product)
-
-                    await asyncio.sleep(
-                        Config.PRODUCT_DELAY_SECONDS
-                        + random.uniform(0.5, 1.5)
-                    )
-
-                gc.collect()
-
-                await asyncio.sleep(
-                    Config.LOOP_SLEEP_SECONDS
-                )
-
-            except Exception as e:
-
-                logger.exception(
-                    f"Erro loop principal: {e}"
-                )
-
-                await asyncio.sleep(60)
-
-
-async def main():
-
-    bot = OffersBot()
-
-    await bot.run()
-
+            logger.exception(f"🔥 Erro crítico no loop principal: {e}")
+            await asyncio.sleep(60)
 
 if __name__ == "__main__":
-
-    server_thread = threading.Thread(
-        target=run_mock_server,
-        daemon=True
-    )
-
-    server_thread.start()
-
+    # Roda a aplicação inteira no loop nativo do Python de forma otimizada
     asyncio.run(main())
