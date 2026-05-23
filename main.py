@@ -136,6 +136,7 @@ async def send_offer_to_telegram(offer: Dict[str, Any], tracking_url: str) -> bo
     texto += f"\n🛒 <b>Link de Acesso Seguro:</b> <a href='{tracking_url}'>Ir para o AliExpress</a>"
 
     base_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+    fallback_necessario = False
     
     # Tentativa primária: Envio formatado com Foto de capa
     if offer.get("url_imagem"):
@@ -164,4 +165,135 @@ async def send_offer_to_telegram(offer: Dict[str, Any], tracking_url: str) -> bo
                     
                     if resp.status_code == 400:
                         logger.warning("Link de imagem recusado pelo Telegram (400) para oferta %s. Ativando fallback.", offer["id"])
+                        fallback_necessario = True
                         break
+                        
+                    resp.raise_for_status()
+                    return True
+        except Exception as exc:
+            logger.error("Falha no disparo com foto (%s). Redirecionando para canal de texto.", exc)
+            fallback_necessario = True
+
+    # Mecanismo de Fallback Secundário ou Fluxo Padrão: Envio de Mensagem de Texto Padrão HTML
+    if fallback_necessario or not offer.get("url_imagem"):
+        try:
+            async for attempt in AsyncRetrying(
+                stop=stop_after_attempt(3),
+                wait=wait_exponential(multiplier=1, min=2, max=6),
+                reraise=True,
+            ):
+                with attempt:
+                    resp = await _http_client.post(
+                        f"{base_url}/sendMessage",
+                        json={
+                            "chat_id": CHAT_ID,
+                            "text": texto,
+                            "parse_mode": "HTML",
+                            "disable_web_page_preview": False,
+                        },
+                    )
+                    if resp.status_code == 429:
+                        retry_after = resp.json().get("parameters", {}).get("retry_after", 5)
+                        await asyncio.sleep(retry_after)
+                        raise httpx.ConnectError("rate_limit_cooldown")
+                    
+                    resp.raise_for_status()
+                    return True
+        except Exception as exc:
+            logger.error("Falha crítica terminal no canal de texto para a oferta %s: %s", offer["id"], exc)
+            return False
+
+    return False
+
+# ---------------------------------------------------------------------------
+# Orquestração de Fluxo e Loop de Execução
+# ---------------------------------------------------------------------------
+async def process_cycle() -> None:
+    """ Processa um lote discreto de candidatos a oferta passando pelo crivo matemático de análise. """
+    logger.info("Iniciando ciclo analítico de varredura...")
+    raw_offers = database.fetch_pending_offers(limit=BATCH_SIZE)
+    logger.info("%d item(ns) recolhido(s) do banco e prontos para triagem estatística.", len(raw_offers))
+
+    for offer in raw_offers:
+        offer_id = offer["id"]
+        
+        # Parse estruturado do histórico em array nativo do Python
+        historical_records = offer.get("historico_precos") or []
+        price_history = [float(r["preco"]) for r in historical_records if "preco" in r]
+        
+        telemetry_data = {
+            "current_price": float(offer["preco_desconto"]),
+            "product_rating": float(offer.get("product_rating") or 4.8),
+            "sales_volume": int(offer.get("sales_volume") or 500),
+            "seller_positive_feedback_rate": float(offer.get("seller_feedback_rate") or 0.95),
+            "store_coupon_value": float(offer.get("cupom_loja_valor") or 0.0),
+            "platform_coupon_value": float(offer.get("cupom_plataforma_valor") or 0.0),
+            "sales_last_6h": int(offer.get("vendas_6h") or 50),
+            "sales_last_6h_previous": int(offer.get("vendas_6h_anteriores") or 20)
+        }
+        
+        # Filtro Avançado Baseado em Ciência de Dados
+        approved, computed_metrics = OfferSniperAnalytics.evaluate_product(telemetry_data, price_history)
+        
+        if not approved:
+            logger.info("Produto %s retido no filtro estatístico (Não passou nos desvios padrão/tendência).", offer_id)
+            database.increment_attempt(offer_id)
+            continue
+            
+        logger.info("🎯 Alvo validado pelo Sniper! TS: %.2f | Floor Price Calculado: R$ %.2f", 
+                    computed_metrics["trending_score"], computed_metrics["floor_price"])
+        
+        # Atualiza dados dinâmicos com base nos cálculos analíticos
+        offer["preco_desconto"] = computed_metrics["floor_price"]
+        offer["trending_score"] = computed_metrics["trending_score"]
+
+        tracking_id = offer.get("tag_afiliado") or ALI_TRACKING_ID
+        tracking_url = await generate_affiliate_link(offer["url_produto"], tracking_id)
+        
+        success = await send_offer_to_telegram(offer, tracking_url)
+
+        if success:
+            database.mark_as_sent(offer_id)
+        else:
+            database.increment_attempt(offer_id)
+
+        await asyncio.sleep(SEND_DELAY)
+
+    logger.info("Ciclo de varredura finalizado.")
+
+
+async def main() -> None:
+    """ Loop assíncrono de orquestração infinita do worker. """
+    logger.info("Bot Sniper de Ofertas Inicializado com Sucesso. Polling ativo: %ds", POLL_INTERVAL)
+
+    try:
+        # Validação estrutural de conectividade e chaves na subida do container
+        database.get_client()
+    except Exception as exc:
+        logger.critical("Erro estrutural de comunicação com base de dados. Finalizando container: %s", exc)
+        sys.exit(1)
+
+    try:
+        while True:
+            await process_cycle()
+            logger.debug("Dormindo pelo tempo de cooldown: %ds...", POLL_INTERVAL)
+            await asyncio.sleep(POLL_INTERVAL)
+    except Exception as exc:
+        logger.exception("Exceção fatal e não controlada capturada no loop principal: %s", exc)
+    finally:
+        if _http_client and not _http_client.is_closed:
+            await _http_client.aclose()
+            logger.info("Pool global de sockets HTTP destruído adequadamente.")
+
+
+if __name__ == "__main__":
+    try:
+        # 1. Cria e inicia a Thread em segundo plano com o servidor web falso.
+        # Isso faz o Render detectar a porta aberta imediatamente sem travar o loop de ofertas.
+        infra_thread = threading.Thread(target=run_dummy_server, daemon=True)
+        infra_thread.start()
+        
+        # 2. Inicializa o motor síncrono/assíncrono principal do bot
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Processamento interrompido via console pelo administrador (SIGINT).")
