@@ -40,7 +40,7 @@ logger = logging.getLogger("bot.main")
 # Configuração via variáveis de ambiente
 # ---------------------------------------------------------------------------
 TELEGRAM_TOKEN: str = os.environ["TELEGRAM_TOKEN"]
-CHAT_ID: str = os.environ["CHAT_ID"]
+CHAT_ID: str = os.environ["ID_DO_GRUPO"]
 ALI_API_KEY: str = os.environ["ALI_API_KEY"]
 ALI_TRACKING_ID: str = os.environ.get("ALI_TRACKING_ID", "default")
 
