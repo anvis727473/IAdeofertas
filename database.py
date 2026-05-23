@@ -9,7 +9,7 @@ Responsabilidades:
 import logging
 import os
 from datetime import datetime, timezone
-from typing import Any, TypeAlias
+from typing import Any, Dict, List
 
 from supabase import Client, create_client
 
@@ -24,47 +24,51 @@ _client: Client | None = None
 def get_client() -> Client:
     global _client
     if _client is None:
-        url = os.environ["SUPABASE_URL"]
-        key = os.environ["SUPABASE_KEY"]
-        _client = create_client(url, key)
-        logger.info("Supabase client inicializado.")
+        try:
+            url = os.environ["SUPABASE_URL"]
+            key = os.environ["SUPABASE_KEY"]
+            _client = create_client(url, key)
+            logger.info("Supabase client inicializado com sucesso.")
+        except KeyError as exc:
+            logger.critical("Variáveis de ambiente do Supabase ausentes: %s", exc)
+            raise
+        except Exception as exc:
+            logger.critical("Falha crítica ao inicializar cliente Supabase: %s", exc)
+            raise
     return _client
 
 
 # ---------------------------------------------------------------------------
-# Tipos auxiliares
+# Tipos auxiliares (Refatorado para compatibilidade com Python 3.9+)
 # ---------------------------------------------------------------------------
-Oferta: TypeAlias = dict[str, Any]
+Oferta = Dict[str, Any]
 
 
 # ---------------------------------------------------------------------------
 # Queries principais
 # ---------------------------------------------------------------------------
 
-def fetch_pending_offers(limit: int = 10) -> list[Oferta]:
+def fetch_pending_offers(limit: int = 10) -> List[Oferta]:
     """
     Retorna até `limit` ofertas que:
       - ainda não foram enviadas (enviado = FALSE)
-      - têm agendamento <= agora  (agendado_para IS NULL ou <= now())
-      - não estão em estado de erro permanente (tentativas < 5)
-    Ordenadas por prioridade DESC, depois por criado_em ASC (FIFO).
+      - têm agendamento <= agora (agendado_para IS NULL ou agendado_para <= agora)
+      - respeitam o limite máximo de 5 tentativas de envio falhas
     """
-    client = get_client()
-    now_iso = datetime.now(timezone.utc).isoformat()
-
     try:
+        client = get_client()
+        agora = datetime.now(timezone.utc).isoformat()
+
         response = (
             client.table("ofertas")
             .select(
-                "id, titulo, preco_original, preco_desconto, "
-                "percentual_desconto, url_produto, url_imagem, "
-                "cupom, tag_afiliado, tentativas"
+                "id, titulo, preco_original, preco_desconto, percentual_desconto, url_produto, url_imagem, cupom, tag_afiliado, tentativas"
             )
             .eq("enviado", False)
             .lt("tentativas", 5)
-            .or_(f"agendado_para.is.null,agendado_para.lte.{now_iso}")
+            .or_(f"agendado_para.is.null,agendado_para.lte.{agora}")
             .order("prioridade", desc=True)
-            .order("criado_em", desc=False)
+            .order("criado_em")
             .limit(limit)
             .execute()
         )
@@ -76,9 +80,7 @@ def fetch_pending_offers(limit: int = 10) -> list[Oferta]:
 
 def mark_as_sent(offer_id: str) -> bool:
     """
-    Marca a oferta como enviada com sucesso.
-    Usa .eq("enviado", False) como guard para evitar double-write
-    em caso de race condition (execução paralela futura).
+    Marca uma oferta como enviada com sucesso no Supabase para garantir idempotência.
     """
     client = get_client()
     try:
@@ -105,7 +107,7 @@ def increment_attempt(offer_id: str) -> None:
         # RPC garante incremento atômico sem race condition
         client.rpc("increment_tentativas", {"offer_id": offer_id}).execute()
     except Exception as exc:
-        # Fallback: leitura + escrita (não-atômico, mas aceitável para este caso)
+        # Fallback: leitura + escrita (não-atômico, mas aceitável para este caso de falha de RPC)
         logger.warning(
             "RPC indisponível, usando fallback para incremento: %s", exc
         )
@@ -123,5 +125,7 @@ def increment_attempt(offer_id: str) -> None:
             ).eq("id", offer_id).execute()
         except Exception as inner:
             logger.error(
-                "Falha no fallback de incremento para %s: %s", offer_id, inner
+                "Falha crítica no fallback de incremento da oferta %s: %s",
+                offer_id,
+                inner,
             )
