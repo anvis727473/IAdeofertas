@@ -12,7 +12,7 @@ import asyncio
 import logging
 import os
 import sys
-from typing import Any
+from typing import Any, Dict
 
 import httpx
 from tenacity import (
@@ -31,7 +31,7 @@ import database
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%Y-%m-%dT%H:%M:%S",
+    datefmt=%Y-%m-%dT%H:%M:%S,
     stream=sys.stdout,
 )
 logger = logging.getLogger("bot.main")
@@ -40,294 +40,190 @@ logger = logging.getLogger("bot.main")
 # Configuração via variáveis de ambiente
 # ---------------------------------------------------------------------------
 TELEGRAM_TOKEN: str = os.environ["TELEGRAM_TOKEN"]
-CHAT_ID: str = os.environ["ID_DO_GRUPO"]
+CHAT_ID: str = os.environ["CHAT_ID"]
 ALI_API_KEY: str = os.environ["ALI_API_KEY"]
 ALI_TRACKING_ID: str = os.environ.get("ALI_TRACKING_ID", "default")
 
-# Intervalo entre ciclos de polling (segundos). Padrão: 5 minutos.
+# Configurações de Polling e Batch
 POLL_INTERVAL: int = int(os.environ.get("POLL_INTERVAL", "300"))
-# Máximo de ofertas processadas por ciclo (controle de rate limit do Telegram).
 BATCH_SIZE: int = int(os.environ.get("BATCH_SIZE", "5"))
-# Pausa entre envios dentro do mesmo ciclo (evita flood do Telegram).
 SEND_DELAY: float = float(os.environ.get("SEND_DELAY", "3.0"))
 
 # ---------------------------------------------------------------------------
-# URLs base
+# HTTP Client Reutilizável (Connection Pool)
 # ---------------------------------------------------------------------------
-ALI_AFFILIATE_URL = "https://api-sg.aliexpress.com/sync"
-TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
-
-# ---------------------------------------------------------------------------
-# Cliente HTTP compartilhado (connection pool reutilizado por todo o ciclo)
-# ---------------------------------------------------------------------------
-_http_client: httpx.AsyncClient | None = None
-
-
-def get_http_client() -> httpx.AsyncClient:
-    global _http_client
-    if _http_client is None or _http_client.is_closed:
-        _http_client = httpx.AsyncClient(
-            timeout=httpx.Timeout(15.0, connect=5.0),
-            limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
-            headers={"Accept": "application/json"},
-        )
-    return _http_client
-
+_http_client: httpx.AsyncClient = httpx.AsyncClient(
+    timeout=httpx.Timeout(15.0, connect=5.0),
+    limits=httpx.Limits(max_keepalive_connections=5, max_connections=10),
+)
 
 # ---------------------------------------------------------------------------
-# AliExpress — Geração de link de afiliado
+# Integrações de APIs Externas
 # ---------------------------------------------------------------------------
 
-async def generate_affiliate_link(product_url: str, tag: str | None = None) -> str:
+async def generate_affiliate_link(original_url: str, tracking_id: str) -> str:
     """
-    Chama a AliExpress Affiliate API para converter a URL do produto
-    em um link rastreável de afiliado.
-
-    Documentação de referência:
-    https://developers.aliexpress.com/en/doc.htm?docId=45047
-
-    Retorna a URL original como fallback em caso de falha.
+    Chama a API do AliExpress para converter o link original em um link de afiliado monetizado.
+    Se falhar, retorna o link original como fallback seguro.
     """
-    tracking_id = tag or ALI_TRACKING_ID
-    params: dict[str, Any] = {
+    url = "https://api-sg.aliexpress.com/sync"
+    params = {
         "method": "aliexpress.affiliate.link.generate",
         "app_key": ALI_API_KEY,
         "tracking_id": tracking_id,
         "promotion_link_type": "0",
-        "source_values": product_url,
-        "sign_method": "md5",  # substituir por HMAC-SHA256 em produção
+        "source_values": original_url,
+        "sign_method": "md5",  # Nota: Em produção real, calcular o hash do parâmetro 'sign'
     }
 
-    client = get_http_client()
+    try:
+        # Implementação de política de retry contra instabilidades de rede na API do AliExpress
+        async for attempt in AsyncRetrying(
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=1, min=2, max=6),
+            retry=retry_if_exception_type((httpx.HTTPError, asyncio.TimeoutError)),
+            reraise=True,
+        ):
+            with attempt:
+                response = await _http_client.get(url, params=params)
+                response.raise_for_status()
+                data = response.json()
+                
+                # Tratamento defensivo da resposta JSON
+                result = data.get("aliexpress_affiliate_link_generate_response", {}).get("resp_result", {})
+                if result.get("resp_code") == 200:
+                    links = result.get("result", {}).get("promotional_link_list", {}).get("promotion_link", [])
+                    if links and len(links) > 0:
+                        return links[0].get("promotion_link")
+                
+                logger.warning("AliExpress retornou estrutura vazia para %s", original_url)
+                return original_url
+    except Exception as exc:
+        logger.error("Erro na API do AliExpress para %s: %s", original_url, exc)
+    return original_url
+
+
+async def send_offer_to_telegram(offer: Dict[str, Any], tracking_url: str) -> bool:
+    """
+    Envia o card formatado para o Telegram. Tenta enviar com foto; se falhar, envia em formato texto.
+    """
+    # Construção da mensagem formatada em HTML
+    titulo = offer["titulo"]
+    p_orig = offer["preco_original"]
+    p_desc = offer["preco_desconto"]
+    pct = offer["percentual_desconto"]
+    cupom = offer["cupom"]
+
+    texto = f"🔥 <b>{titulo}</b>\n\n"
+    if p_orig:
+        texto += f"❌ De: <s>R$ {p_orig:.2f}</s>\n"
+    texto += f"✅ Por: <b>R$ {p_desc:.2f}</b>"
+    if pct:
+        texto += f" ({pct}% de desconto)"
+    texto += "\n"
+
+    if cupom:
+        texto += f"🎟️ Cupom: <code>{cupom}</code>\n"
+
+    texto += f"\n🛒 <b>Compre aqui:</b> <a href='{tracking_url}'>Ir para o AliExpress</a>"
+
+    base_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+    
+    # Payload para envio com Foto
+    if offer.get("url_imagem"):
+        try:
+            async for attempt in AsyncRetrying(
+                stop=stop_after_attempt(4),
+                wait=wait_exponential(multiplier=1, min=2, max=8),
+                retry=retry_if_exception_type((httpx.HTTPError, asyncio.TimeoutError)),
+                reraise=True,
+            ):
+                with attempt:
+                    resp = await _http_client.post(
+                        f"{base_url}/sendPhoto",
+                        json={
+                            "chat_id": CHAT_ID,
+                            "photo": offer["url_imagem"],
+                            "caption": texto,
+                            "parse_mode": "HTML",
+                        },
+                    )
+                    if resp.status_code == 429:
+                        retry_after = resp.json().get("parameters", {}).get("retry_after", 5)
+                        logger.warning("Telegram Rate Limit (429). Aguardando %ds...", retry_after)
+                        await asyncio.sleep(retry_after)
+                        raise httpx.ConnectError("rate_limit_retry")
+                    
+                    if resp.status_code == 400:
+                        logger.warning("Imagem inválida para oferta %s. Usando fallback texto.", offer["id"])
+                        break  # Sai do retry da foto para cair no fallback de texto abaixo
+                        
+                    resp.raise_for_status()
+                    return True
+        except RetryError:
+            logger.error("Excedidas tentativas de envio de imagem para oferta %s. Tentando texto.", offer["id"])
+        except Exception as exc:
+            logger.error("Falha no endpoint sendPhoto: %s. Mudando para texto.", exc)
+
+    # Fallback: Envio apenas como mensagem de Texto puro
     try:
         async for attempt in AsyncRetrying(
             stop=stop_after_attempt(3),
-            wait=wait_exponential(multiplier=1, min=2, max=10),
-            retry=retry_if_exception_type(
-                (httpx.ConnectError, httpx.TimeoutException, httpx.RemoteProtocolError)
-            ),
+            wait=wait_exponential(multiplier=1, min=2, max=6),
             reraise=True,
         ):
             with attempt:
-                response = await client.get(ALI_AFFILIATE_URL, params=params)
-                response.raise_for_status()
-
-        data = response.json()
-        result = (
-            data.get("aliexpress_affiliate_link_generate_response", {})
-            .get("resp_result", {})
-            .get("result", {})
-            .get("promotion_links", {})
-            .get("promotion_link", [])
-        )
-        if result:
-            affiliate_url: str = result[0].get("promotion_link", product_url)
-            logger.debug("Link afiliado gerado: %s", affiliate_url)
-            return affiliate_url
-
-        logger.warning("AliExpress retornou estrutura vazia para %s", product_url)
-        return product_url
-
-    except RetryError as exc:
-        logger.error(
-            "AliExpress API indisponível após 3 tentativas para %s: %s",
-            product_url,
-            exc,
-        )
-        return product_url
-    except httpx.HTTPStatusError as exc:
-        logger.error(
-            "HTTP %s da AliExpress para %s: %s",
-            exc.response.status_code,
-            product_url,
-            exc,
-        )
-        return product_url
-
-
-# ---------------------------------------------------------------------------
-# Telegram — Formatação e envio do card de oferta
-# ---------------------------------------------------------------------------
-
-def _format_offer_caption(offer: dict[str, Any], affiliate_link: str) -> str:
-    """
-    Formata a mensagem em Markdown V2 compatível com o Telegram.
-    Emojis e estrutura visual para maximizar CTR.
-    """
-    titulo = _escape_md(offer.get("titulo", "Produto sem título"))
-    preco_original = offer.get("preco_original")
-    preco_desconto = offer.get("preco_desconto")
-    percentual = offer.get("percentual_desconto")
-    cupom = offer.get("cupom")
-
-    lines: list[str] = [
-        f"🔥 *{titulo}*",
-        "",
-    ]
-
-    if preco_original and preco_desconto:
-        po = _escape_md(f"R$ {preco_original:.2f}")
-        pd = _escape_md(f"R$ {preco_desconto:.2f}")
-        lines.append(f"~~{po}~~ ➡️ *{pd}*")
-    elif preco_desconto:
-        pd = _escape_md(f"R$ {preco_desconto:.2f}")
-        lines.append(f"💰 *{pd}*")
-
-    if percentual:
-        p = _escape_md(f"{percentual:.0f}%")
-        lines.append(f"📉 Desconto de *{p}*")
-
-    if cupom:
-        c = _escape_md(cupom)
-        lines.append(f"🎟 Cupom: `{c}`")
-
-    link = _escape_md(affiliate_link)
-    lines += [
-        "",
-        f"[🛒 Comprar agora]({link})",
-        "",
-        "\\#oferta \\#aliexpress",
-    ]
-
-    return "\n".join(lines)
-
-
-def _escape_md(text: str) -> str:
-    """Escapa caracteres reservados do MarkdownV2 do Telegram."""
-    reserved = r"\_*[]()~`>#+-=|{}.!"
-    return "".join(f"\\{c}" if c in reserved else c for c in str(text))
-
-
-async def send_offer_to_telegram(
-    offer: dict[str, Any],
-    affiliate_link: str,
-) -> bool:
-    """
-    Envia o card da oferta via sendPhoto (com imagem) ou
-    sendMessage (fallback sem imagem).
-    Retorna True em caso de sucesso.
-    """
-    caption = _format_offer_caption(offer, affiliate_link)
-    image_url: str | None = offer.get("url_imagem")
-    client = get_http_client()
-
-    async def _send_photo() -> httpx.Response:
-        return await client.post(
-            f"{TELEGRAM_API_URL}/sendPhoto",
-            json={
-                "chat_id": CHAT_ID,
-                "photo": image_url,
-                "caption": caption,
-                "parse_mode": "MarkdownV2",
-            },
-        )
-
-    async def _send_text() -> httpx.Response:
-        return await client.post(
-            f"{TELEGRAM_API_URL}/sendMessage",
-            json={
-                "chat_id": CHAT_ID,
-                "text": caption,
-                "parse_mode": "MarkdownV2",
-                "disable_web_page_preview": False,
-            },
-        )
-
-    try:
-        async for attempt in AsyncRetrying(
-            stop=stop_after_attempt(4),
-            wait=wait_exponential(multiplier=2, min=3, max=30),
-            retry=retry_if_exception_type(
-                (httpx.ConnectError, httpx.TimeoutException)
-            ),
-            reraise=True,
-        ):
-            with attempt:
-                resp = await (_send_photo() if image_url else _send_text())
-
-                # Telegram 429 Too Many Requests — respeitar retry_after
+                resp = await _http_client.post(
+                    f"{base_url}/sendMessage",
+                    json={
+                        "chat_id": CHAT_ID,
+                        "text": texto,
+                        "parse_mode": "HTML",
+                        "disable_web_page_preview": False,
+                    },
+                )
                 if resp.status_code == 429:
-                    retry_after = int(
-                        resp.json().get("parameters", {}).get("retry_after", 10)
-                    )
-                    logger.warning(
-                        "Rate limit Telegram. Aguardando %ds.", retry_after
-                    )
+                    retry_after = resp.json().get("parameters", {}).get("retry_after", 5)
                     await asyncio.sleep(retry_after)
-                    raise httpx.ConnectError("rate_limit_retry")  # força nova tentativa
-
-                if resp.status_code == 400 and image_url:
-                    # Imagem inválida/inacessível — tenta fallback de texto
-                    logger.warning(
-                        "Imagem inválida para oferta %s. Usando fallback texto.",
-                        offer["id"],
-                    )
-                    resp = await _send_text()
-
+                    raise httpx.ConnectError("rate_limit_retry")
+                
                 resp.raise_for_status()
-
-        logger.info("Oferta %s enviada ao Telegram com sucesso.", offer["id"])
-        return True
-
-    except RetryError as exc:
-        logger.error(
-            "Telegram indisponível após retries para oferta %s: %s",
-            offer["id"],
-            exc,
-        )
-        return False
-    except httpx.HTTPStatusError as exc:
-        logger.error(
-            "HTTP %s ao enviar oferta %s: %s",
-            exc.response.status_code,
-            offer["id"],
-            exc,
-        )
+                return True
+    except Exception as exc:
+        logger.error("Falha crítica ao enviar mensagem texto para oferta %s: %s", offer["id"], exc)
         return False
 
 
 # ---------------------------------------------------------------------------
-# Loop principal assíncrono
+# Ciclo Principal do Worker
 # ---------------------------------------------------------------------------
 
 async def process_cycle() -> None:
     """
-    Executa um ciclo completo de processamento:
-    busca → gera links → envia → atualiza status.
+    Executa um lote isolado de processamento de ofertas pendentes.
     """
     logger.info("Iniciando ciclo de processamento...")
     offers = database.fetch_pending_offers(limit=BATCH_SIZE)
-
-    if not offers:
-        logger.info("Nenhuma oferta pendente neste ciclo.")
-        return
-
     logger.info("%d oferta(s) encontrada(s) para envio.", len(offers))
 
     for offer in offers:
-        offer_id: str = offer["id"]
-        product_url: str = offer.get("url_produto", "")
+        offer_id = offer["id"]
+        # Prioriza a tag customizada da oferta; se nula, usa a global
+        tracking_id = offer.get("tag_afiliado") or ALI_TRACKING_ID
 
-        if not product_url:
-            logger.warning("Oferta %s sem URL de produto. Pulando.", offer_id)
-            database.increment_attempt(offer_id)
-            continue
+        # 1. Monetização do link
+        tracking_url = await generate_affiliate_link(offer["url_produto"], tracking_id)
 
-        # 1. Gera link de afiliado
-        affiliate_link = await generate_affiliate_link(
-            product_url, offer.get("tag_afiliado")
-        )
+        # 2. Despacho ao canal do Telegram
+        success = await send_offer_to_telegram(offer, tracking_url)
 
-        # 2. Envia para o Telegram
-        success = await send_offer_to_telegram(offer, affiliate_link)
-
-        # 3. Atualiza status no Supabase
+        # 3. Conciliação do Estado no Banco de Dados (Idempotência)
         if success:
             database.mark_as_sent(offer_id)
         else:
             database.increment_attempt(offer_id)
 
-        # Pausa entre envios para respeitar rate limit do Telegram
+        # Pausa anti-flood sequencial entre mensagens
         await asyncio.sleep(SEND_DELAY)
 
     logger.info("Ciclo concluído.")
@@ -344,32 +240,29 @@ async def main() -> None:
         BATCH_SIZE,
     )
 
-    # Valida conectividade com Supabase na inicialização
+    # Valida conectividade estrutural com o Supabase na inicialização
     try:
         database.get_client()
     except Exception as exc:
-        logger.critical("Falha ao conectar ao Supabase: %s", exc)
+        logger.critical("Falha ao conectar ao Supabase: %s. Encerrando execução do container.", exc)
         sys.exit(1)
 
-    while True:
-        try:
+    try:
+        while True:
             await process_cycle()
-        except Exception as exc:
-            # Captura genérica para evitar crash do worker
-            logger.exception(
-                "Erro inesperado no ciclo principal: %s. Continuando...", exc
-            )
-        finally:
-            # asyncio.sleep libera a event loop — zero CPU ocioso
             logger.debug("Dormindo por %ds...", POLL_INTERVAL)
             await asyncio.sleep(POLL_INTERVAL)
+    except Exception as exc:
+        logger.exception("Erro inesperado e não tratado detectado no loop principal: %s", exc)
+    finally:
+        # Garante o encerramento correto do pool HTTP no fechamento do loop assíncrono
+        if _http_client and not _http_client.is_closed:
+            await _http_client.aclose()
+            logger.info("Pool de conexões HTTP finalizado.")
 
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("Bot encerrado pelo operador.")
-    finally:
-        if _http_client and not _http_client.is_closed:
-            asyncio.run(_http_client.aclose())
+        logger.info("Bot encerrado via interrupção de teclado (SIGINT).")
