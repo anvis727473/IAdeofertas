@@ -3,6 +3,7 @@ database.py — Camada de dados Supabase
 Responsabilidades:
   - Estabelecer a ligação segura com o Supabase utilizando um Singleton reutilizável
   - Fornecer queries robustas para leitura de filas de processamento e atualização de estados
+  - Sanitizar chaves de API contra quebras de linha ou espaços gerados pela infraestrutura do Render
 """
 
 import logging
@@ -17,11 +18,19 @@ logger = logging.getLogger(__name__)
 _client: Client | None = None
 
 def get_client() -> Client:
+    """
+    Inicializa e retorna o cliente do Supabase com sanitização estrita de chaves de API.
+    """
     global _client
     if _client is None:
         try:
-            url = os.environ["SUPABASE_URL"]
-            key = os.environ["SUPABASE_KEY"]
+            # Captura e limpa espaços vazios ou quebras de linha acidentais geradas pelo Render
+            url = os.environ.get("SUPABASE_URL", "").strip()
+            key = os.environ.get("SUPABASE_KEY", "").strip()
+            
+            if not url or not key:
+                raise ValueError("SUPABASE_URL ou SUPABASE_KEY estão vazias ou ausentes no ambiente de produção.")
+                
             _client = create_client(url, key)
             logger.info("Supabase client inicializado com sucesso.")
         except KeyError as exc:
@@ -68,8 +77,8 @@ def mark_as_sent(offer_id: str) -> bool:
     """
     Registra que o disparo foi concluído, assegurando idempotência estrita.
     """
-    client = get_client()
     try:
+        client = get_client()
         client.table("ofertas").update(
             {
                 "enviado": True,
@@ -86,12 +95,13 @@ def increment_attempt(offer_id: str) -> None:
     """
     Incrementa de forma atómica o contador de tentativas da oferta para suspensão em caso de erros recorrentes.
     """
-    client = get_client()
     try:
+        client = get_client()
         client.rpc("increment_tentativas", {"offer_id": offer_id}).execute()
     except Exception as exc:
         logger.warning("Falha na chamada RPC de incremento. Utilizando mecanismo de fallback: %s", exc)
         try:
+            client = get_client()
             row = (
                 client.table("ofertas")
                 .select("tentativas")
