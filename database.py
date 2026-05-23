@@ -1,9 +1,8 @@
 """
 database.py — Camada de dados Supabase
 Responsabilidades:
-  - Buscar ofertas agendadas e ainda não enviadas
-  - Marcar oferta como enviada (idempotência)
-  - Registrar erros de envio para reprocessamento
+  - Estabelecer a ligação segura com o Supabase utilizando um Singleton reutilizável
+  - Fornecer queries robustas para leitura de filas de processamento e atualização de estados
 """
 
 import logging
@@ -15,11 +14,7 @@ from supabase import Client, create_client
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Conexão singleton — criada uma única vez ao importar o módulo
-# ---------------------------------------------------------------------------
 _client: Client | None = None
-
 
 def get_client() -> Client:
     global _client
@@ -30,30 +25,19 @@ def get_client() -> Client:
             _client = create_client(url, key)
             logger.info("Supabase client inicializado com sucesso.")
         except KeyError as exc:
-            logger.critical("Variáveis de ambiente do Supabase ausentes: %s", exc)
+            logger.critical("Variáveis de ambiente do Supabase ausentes no runtime: %s", exc)
             raise
         except Exception as exc:
-            logger.critical("Falha crítica ao inicializar cliente Supabase: %s", exc)
+            logger.critical("Falha crítica ao instanciar cliente do Supabase: %s", exc)
             raise
     return _client
 
-
-# ---------------------------------------------------------------------------
-# Tipos auxiliares (Refatorado para compatibilidade com Python 3.9+)
-# ---------------------------------------------------------------------------
+# Tipagem retrocompatível para Python 3.9 / 3.10 / 3.11
 Oferta = Dict[str, Any]
-
-
-# ---------------------------------------------------------------------------
-# Queries principais
-# ---------------------------------------------------------------------------
 
 def fetch_pending_offers(limit: int = 10) -> List[Oferta]:
     """
-    Retorna até `limit` ofertas que:
-      - ainda não foram enviadas (enviado = FALSE)
-      - têm agendamento <= agora (agendado_para IS NULL ou agendado_para <= agora)
-      - respeitam o limite máximo de 5 tentativas de envio falhas
+    Busca no banco ofertas pendentes aptas a processamento analítico.
     """
     try:
         client = get_client()
@@ -62,7 +46,10 @@ def fetch_pending_offers(limit: int = 10) -> List[Oferta]:
         response = (
             client.table("ofertas")
             .select(
-                "id, titulo, preco_original, preco_desconto, percentual_desconto, url_produto, url_imagem, cupom, tag_afiliado, tentativas"
+                "id, titulo, preco_original, preco_desconto, percentual_desconto, "
+                "url_produto, url_imagem, cupom, tag_afiliado, tentativas, historico_precos, "
+                "product_rating, sales_volume, seller_feedback_rate, cupom_loja_valor, "
+                "cupom_plataforma_valor, vendas_6h, vendas_6h_anteriores"
             )
             .eq("enviado", False)
             .lt("tentativas", 5)
@@ -74,13 +61,12 @@ def fetch_pending_offers(limit: int = 10) -> List[Oferta]:
         )
         return response.data or []
     except Exception as exc:
-        logger.error("Erro ao buscar ofertas pendentes: %s", exc)
+        logger.error("Erro ao buscar ofertas pendentes no Supabase: %s", exc)
         return []
-
 
 def mark_as_sent(offer_id: str) -> bool:
     """
-    Marca uma oferta como enviada com sucesso no Supabase para garantir idempotência.
+    Registra que o disparo foi concluído, assegurando idempotência estrita.
     """
     client = get_client()
     try:
@@ -90,27 +76,21 @@ def mark_as_sent(offer_id: str) -> bool:
                 "enviado_em": datetime.now(timezone.utc).isoformat(),
             }
         ).eq("id", offer_id).eq("enviado", False).execute()
-        logger.info("Oferta %s marcada como enviada.", offer_id)
+        logger.info("Oferta %s marcada como enviada com sucesso no banco.", offer_id)
         return True
     except Exception as exc:
-        logger.error("Falha ao marcar oferta %s como enviada: %s", offer_id, exc)
+        logger.error("Falha ao atualizar estado de envio da oferta %s: %s", offer_id, exc)
         return False
-
 
 def increment_attempt(offer_id: str) -> None:
     """
-    Incrementa o contador de tentativas malsucedidas.
-    Após 5 tentativas a oferta é ignorada pelo fetch_pending_offers.
+    Incrementa de forma atómica o contador de tentativas da oferta para suspensão em caso de erros recorrentes.
     """
     client = get_client()
     try:
-        # RPC garante incremento atômico sem race condition
         client.rpc("increment_tentativas", {"offer_id": offer_id}).execute()
     except Exception as exc:
-        # Fallback: leitura + escrita (não-atômico, mas aceitável para este caso de falha de RPC)
-        logger.warning(
-            "RPC indisponível, usando fallback para incremento: %s", exc
-        )
+        logger.warning("Falha na chamada RPC de incremento. Utilizando mecanismo de fallback: %s", exc)
         try:
             row = (
                 client.table("ofertas")
@@ -124,8 +104,4 @@ def increment_attempt(offer_id: str) -> None:
                 {"tentativas": current + 1}
             ).eq("id", offer_id).execute()
         except Exception as inner:
-            logger.error(
-                "Falha crítica no fallback de incremento da oferta %s: %s",
-                offer_id,
-                inner,
-            )
+            logger.error("Falha crítica no fallback de incremento da oferta %s: %s", offer_id, inner)
