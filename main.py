@@ -26,12 +26,12 @@ from tenacity import (
 import database
 
 # ---------------------------------------------------------------------------
-# Logging
+# Logging (CORRIGIDO: Especificação de string no parâmetro datefmt)
 # ---------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt=%Y-%m-%dT%H:%M:%S,
+    datefmt="%Y-%m-%dT%H:%M:%S",
     stream=sys.stdout,
 )
 logger = logging.getLogger("bot.main")
@@ -73,11 +73,10 @@ async def generate_affiliate_link(original_url: str, tracking_id: str) -> str:
         "tracking_id": tracking_id,
         "promotion_link_type": "0",
         "source_values": original_url,
-        "sign_method": "md5",  # Nota: Em produção real, calcular o hash do parâmetro 'sign'
+        "sign_method": "md5",
     }
 
     try:
-        # Implementação de política de retry contra instabilidades de rede na API do AliExpress
         async for attempt in AsyncRetrying(
             stop=stop_after_attempt(3),
             wait=wait_exponential(multiplier=1, min=2, max=6),
@@ -89,7 +88,6 @@ async def generate_affiliate_link(original_url: str, tracking_id: str) -> str:
                 response.raise_for_status()
                 data = response.json()
                 
-                # Tratamento defensivo da resposta JSON
                 result = data.get("aliexpress_affiliate_link_generate_response", {}).get("resp_result", {})
                 if result.get("resp_code") == 200:
                     links = result.get("result", {}).get("promotional_link_list", {}).get("promotion_link", [])
@@ -107,7 +105,6 @@ async def send_offer_to_telegram(offer: Dict[str, Any], tracking_url: str) -> bo
     """
     Envia o card formatado para o Telegram. Tenta enviar com foto; se falhar, envia em formato texto.
     """
-    # Construção da mensagem formatada em HTML
     titulo = offer["titulo"]
     p_orig = offer["preco_original"]
     p_desc = offer["preco_desconto"]
@@ -129,7 +126,6 @@ async def send_offer_to_telegram(offer: Dict[str, Any], tracking_url: str) -> bo
 
     base_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
     
-    # Payload para envio com Foto
     if offer.get("url_imagem"):
         try:
             async for attempt in AsyncRetrying(
@@ -156,7 +152,7 @@ async def send_offer_to_telegram(offer: Dict[str, Any], tracking_url: str) -> bo
                     
                     if resp.status_code == 400:
                         logger.warning("Imagem inválida para oferta %s. Usando fallback texto.", offer["id"])
-                        break  # Sai do retry da foto para cair no fallback de texto abaixo
+                        break
                         
                     resp.raise_for_status()
                     return True
@@ -165,7 +161,6 @@ async def send_offer_to_telegram(offer: Dict[str, Any], tracking_url: str) -> bo
         except Exception as exc:
             logger.error("Falha no endpoint sendPhoto: %s. Mudando para texto.", exc)
 
-    # Fallback: Envio apenas como mensagem de Texto puro
     try:
         async for attempt in AsyncRetrying(
             stop=stop_after_attempt(3),
@@ -208,22 +203,16 @@ async def process_cycle() -> None:
 
     for offer in offers:
         offer_id = offer["id"]
-        # Prioriza a tag customizada da oferta; se nula, usa a global
         tracking_id = offer.get("tag_afiliado") or ALI_TRACKING_ID
 
-        # 1. Monetização do link
         tracking_url = await generate_affiliate_link(offer["url_produto"], tracking_id)
-
-        # 2. Despacho ao canal do Telegram
         success = await send_offer_to_telegram(offer, tracking_url)
 
-        # 3. Conciliação do Estado no Banco de Dados (Idempotência)
         if success:
             database.mark_as_sent(offer_id)
         else:
             database.increment_attempt(offer_id)
 
-        # Pausa anti-flood sequencial entre mensagens
         await asyncio.sleep(SEND_DELAY)
 
     logger.info("Ciclo concluído.")
@@ -240,7 +229,6 @@ async def main() -> None:
         BATCH_SIZE,
     )
 
-    # Valida conectividade estrutural com o Supabase na inicialização
     try:
         database.get_client()
     except Exception as exc:
@@ -255,7 +243,6 @@ async def main() -> None:
     except Exception as exc:
         logger.exception("Erro inesperado e não tratado detectado no loop principal: %s", exc)
     finally:
-        # Garante o encerramento correto do pool HTTP no fechamento do loop assíncrono
         if _http_client and not _http_client.is_closed:
             await _http_client.aclose()
             logger.info("Pool de conexões HTTP finalizado.")
