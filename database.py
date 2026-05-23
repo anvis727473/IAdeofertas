@@ -9,7 +9,7 @@ Responsabilidades:
 import logging
 import os
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, TypeAlias
 
 from supabase import Client, create_client
 
@@ -34,7 +34,7 @@ def get_client() -> Client:
 # ---------------------------------------------------------------------------
 # Tipos auxiliares
 # ---------------------------------------------------------------------------
-type Oferta = dict[str, Any]
+Oferta: TypeAlias = dict[str, Any]
 
 
 # ---------------------------------------------------------------------------
