@@ -1,11 +1,5 @@
 """
-main.py — Motor assíncrono do bot de ofertas
-Fluxo por ciclo:
-  1. Busca ofertas pendentes no Supabase
-  2. Para cada oferta, gera link de afiliado via AliExpress API
-  3. Formata e envia card para o canal Telegram
-  4. Marca oferta como enviada ou registra falha
-  5. Dorme POLL_INTERVAL segundos e repete
+main.py — Motor assíncrono do bot de ofertas (Sniper Edition)
 """
 
 import asyncio
@@ -24,9 +18,10 @@ from tenacity import (
 )
 
 import database
+from analytics import OfferSniperAnalytics
 
 # ---------------------------------------------------------------------------
-# Logging (CORRIGIDO: Especificação de string no parâmetro datefmt)
+# Configuração de Logging Central (Sintaxe com strings corrigida)
 # ---------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
@@ -37,34 +32,30 @@ logging.basicConfig(
 logger = logging.getLogger("bot.main")
 
 # ---------------------------------------------------------------------------
-# Configuração via variáveis de ambiente
+# Captura de Configurações de Infraestrutura
 # ---------------------------------------------------------------------------
 TELEGRAM_TOKEN: str = os.environ["TELEGRAM_TOKEN"]
 CHAT_ID: str = os.environ["CHAT_ID"]
 ALI_API_KEY: str = os.environ["ALI_API_KEY"]
 ALI_TRACKING_ID: str = os.environ.get("ALI_TRACKING_ID", "default")
 
-# Configurações de Polling e Batch
 POLL_INTERVAL: int = int(os.environ.get("POLL_INTERVAL", "300"))
 BATCH_SIZE: int = int(os.environ.get("BATCH_SIZE", "5"))
 SEND_DELAY: float = float(os.environ.get("SEND_DELAY", "3.0"))
 
-# ---------------------------------------------------------------------------
-# HTTP Client Reutilizável (Connection Pool)
-# ---------------------------------------------------------------------------
+# Connection pool persistente do HTTPX
 _http_client: httpx.AsyncClient = httpx.AsyncClient(
     timeout=httpx.Timeout(15.0, connect=5.0),
     limits=httpx.Limits(max_keepalive_connections=5, max_connections=10),
 )
 
 # ---------------------------------------------------------------------------
-# Integrações de APIs Externas
+# Integração de Redes e Serviços Externos
 # ---------------------------------------------------------------------------
 
 async def generate_affiliate_link(original_url: str, tracking_id: str) -> str:
     """
-    Chama a API do AliExpress para converter o link original em um link de afiliado monetizado.
-    Se falhar, retorna o link original como fallback seguro.
+    Monetiza URLs normais do AliExpress convertendo-as em links de afiliados.
     """
     url = "https://api-sg.aliexpress.com/sync"
     params = {
@@ -91,46 +82,52 @@ async def generate_affiliate_link(original_url: str, tracking_id: str) -> str:
                 result = data.get("aliexpress_affiliate_link_generate_response", {}).get("resp_result", {})
                 if result.get("resp_code") == 200:
                     links = result.get("result", {}).get("promotional_link_list", {}).get("promotion_link", [])
-                    if links and len(links) > 0:
-                        return links[0].get("promotion_link")
+                    if links:
+                        return links[0].get("promotion_link", original_url)
                 
-                logger.warning("AliExpress retornou estrutura vazia para %s", original_url)
+                logger.warning("Estrutura de links vazia ou inválida vinda do AliExpress para URL: %s", original_url)
                 return original_url
     except Exception as exc:
-        logger.error("Erro na API do AliExpress para %s: %s", original_url, exc)
+        logger.error("Erro ao contactar API do AliExpress para a URL %s: %s", original_url, exc)
     return original_url
 
 
 async def send_offer_to_telegram(offer: Dict[str, Any], tracking_url: str) -> bool:
     """
-    Envia o card formatado para o Telegram. Tenta enviar com foto; se falhar, envia em formato texto.
+    Transmite o card visual para os servidores do Telegram com tratamento dinâmico de falhas.
     """
     titulo = offer["titulo"]
-    p_orig = offer["preco_original"]
+    p_orig = offer.get("preco_original")
     p_desc = offer["preco_desconto"]
-    pct = offer["percentual_desconto"]
-    cupom = offer["cupom"]
+    pct = offer.get("percentual_desconto")
+    cupom = offer.get("cupom")
+    ts_score = offer.get("trending_score", 0.0)
 
-    texto = f"🔥 <b>{titulo}</b>\n\n"
+    # Formatação limpa em HTML
+    texto = f"🎯 <b>{titulo}</b>\n\n"
     if p_orig:
         texto += f"❌ De: <s>R$ {p_orig:.2f}</s>\n"
     texto += f"✅ Por: <b>R$ {p_desc:.2f}</b>"
     if pct:
-        texto += f" ({pct}% de desconto)"
+        texto += f" ({int(pct)}% OFF)"
+    
+    if ts_score > 10:
+        texto += f" | 🔥 <i>Tendência em Alta!</i>"
     texto += "\n"
 
     if cupom:
-        texto += f"🎟️ Cupom: <code>{cupom}</code>\n"
+        texto += f"🎟️ Cupom Aplicável: <code>{cupom}</code>\n"
 
-    texto += f"\n🛒 <b>Compre aqui:</b> <a href='{tracking_url}'>Ir para o AliExpress</a>"
+    texto += f"\n🛒 <b>Link de Acesso Seguro:</b> <a href='{tracking_url}'>Ir para o AliExpress</a>"
 
     base_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
     
+    # Tentativa primária: Envio formatado com Foto de capa
     if offer.get("url_imagem"):
         try:
             async for attempt in AsyncRetrying(
-                stop=stop_after_attempt(4),
-                wait=wait_exponential(multiplier=1, min=2, max=8),
+                stop=stop_after_attempt(3),
+                wait=wait_exponential(multiplier=1, min=2, max=6),
                 retry=retry_if_exception_type((httpx.HTTPError, asyncio.TimeoutError)),
                 reraise=True,
             ):
@@ -146,21 +143,20 @@ async def send_offer_to_telegram(offer: Dict[str, Any], tracking_url: str) -> bo
                     )
                     if resp.status_code == 429:
                         retry_after = resp.json().get("parameters", {}).get("retry_after", 5)
-                        logger.warning("Telegram Rate Limit (429). Aguardando %ds...", retry_after)
+                        logger.warning("Telegram Rate Limit ativo. Aguardando %ds compulsórios...", retry_after)
                         await asyncio.sleep(retry_after)
-                        raise httpx.ConnectError("rate_limit_retry")
+                        raise httpx.ConnectError("rate_limit_cooldown")
                     
                     if resp.status_code == 400:
-                        logger.warning("Imagem inválida para oferta %s. Usando fallback texto.", offer["id"])
+                        logger.warning("Link de imagem recusado pelo Telegram (400) para oferta %s. Ativando fallback.", offer["id"])
                         break
                         
                     resp.raise_for_status()
                     return True
-        except RetryError:
-            logger.error("Excedidas tentativas de envio de imagem para oferta %s. Tentando texto.", offer["id"])
         except Exception as exc:
-            logger.error("Falha no endpoint sendPhoto: %s. Mudando para texto.", exc)
+            logger.error("Falha persistente no disparo com foto (%s). Redirecionando para canal de texto.", exc)
 
+    # Mecanismo de Fallback Secundário: Envio de Mensagem de Texto Padrão HTML
     try:
         async for attempt in AsyncRetrying(
             stop=stop_after_attempt(3),
@@ -180,32 +176,63 @@ async def send_offer_to_telegram(offer: Dict[str, Any], tracking_url: str) -> bo
                 if resp.status_code == 429:
                     retry_after = resp.json().get("parameters", {}).get("retry_after", 5)
                     await asyncio.sleep(retry_after)
-                    raise httpx.ConnectError("rate_limit_retry")
+                    raise httpx.ConnectError("rate_limit_cooldown")
                 
                 resp.raise_for_status()
                 return True
     except Exception as exc:
-        logger.error("Falha crítica ao enviar mensagem texto para oferta %s: %s", offer["id"], exc)
+        logger.error("Falha crítica terminal no canal de texto para a oferta %s: %s", offer["id"], exc)
         return False
 
 
 # ---------------------------------------------------------------------------
-# Ciclo Principal do Worker
+# Orquestração de Fluxo e Loop de Execução
 # ---------------------------------------------------------------------------
 
 async def process_cycle() -> None:
     """
-    Executa um lote isolado de processamento de ofertas pendentes.
+    Processa um lote discreto de candidatos a oferta passando pelo crivo matemático de análise.
     """
-    logger.info("Iniciando ciclo de processamento...")
-    offers = database.fetch_pending_offers(limit=BATCH_SIZE)
-    logger.info("%d oferta(s) encontrada(s) para envio.", len(offers))
+    logger.info("Iniciando ciclo analítico de varredura...")
+    raw_offers = database.fetch_pending_offers(limit=BATCH_SIZE)
+    logger.info("%d item(ns) recolhido(s) do banco e prontos para triagem estatística.", len(raw_offers))
 
-    for offer in offers:
+    for offer in raw_offers:
         offer_id = offer["id"]
-        tracking_id = offer.get("tag_afiliado") or ALI_TRACKING_ID
+        
+        # Parse estruturado do histórico em array nativo do Python
+        historical_records = offer.get("historico_precos") or []
+        price_history = [float(r["preco"]) for r in historical_records if "preco" in r]
+        
+        telemetry_data = {
+            "current_price": float(offer["preco_desconto"]),
+            "product_rating": float(offer.get("product_rating") or 4.8),
+            "sales_volume": int(offer.get("sales_volume") or 500),
+            "seller_positive_feedback_rate": float(offer.get("seller_feedback_rate") or 0.95),
+            "store_coupon_value": float(offer.get("cupom_loja_valor") or 0.0),
+            "platform_coupon_value": float(offer.get("cupom_plataforma_valor") or 0.0),
+            "sales_last_6h": int(offer.get("vendas_6h") or 50),
+            "sales_last_6h_previous": int(offer.get("vendas_6h_anteriores") or 20)
+        }
+        
+        # Filtro Avançado Baseado em Ciência de Dados
+        approved, computed_metrics = OfferSniperAnalytics.evaluate_product(telemetry_data, price_history)
+        
+        if not approved:
+            logger.info("Produto %s retido no filtro estatístico (Não passou nos desvios padrão/tendência).", offer_id)
+            database.increment_attempt(offer_id)
+            continue
+            
+        logger.info("🎯 Alvo validado pelo Sniper! TS: %.2f | Floor Price Calculado: R$ %.2f", 
+                    computed_metrics["trending_score"], computed_metrics["floor_price"])
+        
+        # Atualiza dados dinâmicos com base nos cálculos analíticos
+        offer["preco_desconto"] = computed_metrics["floor_price"]
+        offer["trending_score"] = computed_metrics["trending_score"]
 
+        tracking_id = offer.get("tag_afiliado") or ALI_TRACKING_ID
         tracking_url = await generate_affiliate_link(offer["url_produto"], tracking_id)
+        
         success = await send_offer_to_telegram(offer, tracking_url)
 
         if success:
@@ -215,41 +242,36 @@ async def process_cycle() -> None:
 
         await asyncio.sleep(SEND_DELAY)
 
-    logger.info("Ciclo concluído.")
+    logger.info("Ciclo de varredura finalizado.")
 
 
 async def main() -> None:
     """
-    Worker contínuo: executa ciclos indefinidamente com pausa entre eles.
-    Projetado para rodar como Background Worker no Render.
+    Loop assíncrono de orquestração infinita do worker.
     """
-    logger.info(
-        "Bot iniciado. Intervalo de polling: %ds | Batch: %d",
-        POLL_INTERVAL,
-        BATCH_SIZE,
-    )
+    logger.info("Bot Sniper de Ofertas Inicializado com Sucesso. Polling ativo: %ds", POLL_INTERVAL)
 
     try:
         database.get_client()
     except Exception as exc:
-        logger.critical("Falha ao conectar ao Supabase: %s. Encerrando execução do container.", exc)
+        logger.critical("Erro estrutural de comunicação com base de dados. Finalizando container: %s", exc)
         sys.exit(1)
 
     try:
         while True:
             await process_cycle()
-            logger.debug("Dormindo por %ds...", POLL_INTERVAL)
+            logger.debug("Dormindo pelo tempo de cooldown: %ds...", POLL_INTERVAL)
             await asyncio.sleep(POLL_INTERVAL)
     except Exception as exc:
-        logger.exception("Erro inesperado e não tratado detectado no loop principal: %s", exc)
+        logger.exception("Exceção fatal e não controlada capturada no loop principal: %s", exc)
     finally:
         if _http_client and not _http_client.is_closed:
             await _http_client.aclose()
-            logger.info("Pool de conexões HTTP finalizado.")
+            logger.info("Pool global de sockets HTTP destruído adequadamente.")
 
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("Bot encerrado via interrupção de teclado (SIGINT).")
+        logger.info("Processamento interrompido via console pelo administrador (SIGINT).")
