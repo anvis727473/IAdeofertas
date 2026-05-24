@@ -2,90 +2,51 @@ import asyncio
 import hashlib
 import logging
 import time
-import uuid
 import os
-from typing import Any, Dict, List
 import httpx
 from supabase import Client
 
 logger = logging.getLogger("bot.search_engine")
 
 class AliExpressSearchEngine:
-    def __init__(self, supabase_client: Client, api_key: str, max_concurrent_requests: int = 3):
+    # Filtro cirúrgico: O que NÃO queremos
+    BLACKLIST = ["clothes", "dress", "sexy", "lingerie", "toy", "plush", "poster", "sticker", "baby"]
+    # O que obrigatoriamente precisamos
+    NICHE = ["ssd", "keyboard", "mouse", "monitor", "router", "hub", "pc", "gaming", "usb", "headset", "ram"]
+
+    def __init__(self, supabase_client: Client, api_key: str):
         self.supabase = supabase_client
         self.app_key = api_key
         self.app_secret = os.environ.get("ALI_APP_SECRET", "")
-        self.NAMESPACE_ALI = uuid.UUID('6ba7b810-9dad-11d1-80b4-00c04fd430c8')
-        self.semaphore = asyncio.Semaphore(max_concurrent_requests)
-        self.http_client = httpx.AsyncClient(
-            base_url="https://api-sg.aliexpress.com",
-            http2=True,
-            timeout=httpx.Timeout(15.0, connect=5.0)
-        )
+        self.http_client = httpx.AsyncClient(base_url="https://api-sg.aliexpress.com", http2=True, timeout=15.0)
 
-    def _generate_sign(self, params: Dict[str, Any]) -> str:
-        sorted_keys = sorted(params.keys())
-        sign_str = self.app_secret
-        for key in sorted_keys:
-            sign_str += f"{key}{params[key]}"
-        sign_str += self.app_secret
-        return hashlib.md5(sign_str.encode('utf-8')).hexdigest().upper()
+    def _is_valid(self, title: str) -> bool:
+        t = title.lower()
+        if any(bad in t for bad in self.BLACKLIST): return False
+        return any(good in t for good in self.NICHE)
 
-    async def fetch_keyword_page(self, keyword: str, page_no: int) -> List[Dict[str, Any]]:
+    async def fetch_and_save(self, keyword: str):
         params = {
-            "app_key": self.app_key,
-            "fields": "product_id,product_title,product_detail_url,product_main_image_url,target_sale_price,target_original_price,discount,evaluate_rate,shop_review_rate,volume,promotion_link",
-            "keyword": keyword,
-            "method": "aliexpress.affiliate.product.query",
-            "page_no": str(page_no),
-            "page_size": "50",  # Lote aumentado
-            "sign_method": "md5",
-            "sort": "VOLUME_DESC",
-            "timestamp": str(int(time.time() * 1000))
+            "app_key": self.app_key, "fields": "product_id,product_title,target_sale_price,target_original_price,promotion_link",
+            "keyword": keyword, "method": "aliexpress.affiliate.product.query", "page_size": "20",
+            "timestamp": str(int(time.time() * 1000)), "sort": "VOLUME_DESC"
         }
-        params["sign"] = self._generate_sign(params)
-        
-        async with self.semaphore:
-            try:
-                response = await self.http_client.get("/sync", params=params)
-                if response.status_code != 200: return []
-                data = response.json()
-                if "error_response" in data: return []
-                
-                resp = data.get("aliexpress_affiliate_product_query_response", {})
-                products = resp.get("resp_result", {}).get("result", {}).get("products", {}).get("product", [])
-                return products if isinstance(products, list) else [products] if products else []
-            except Exception: return []
-
-    async def run_parallel_discovery(self, keywords: List[str], target_pages: int = 1) -> int:
-        tasks = [self.fetch_keyword_page(kw, page) for kw in keywords for page in range(1, target_pages + 1)]
-        results = await asyncio.gather(*tasks)
-        raw_products = [item for sublist in results for item in sublist]
-        
-        inserted_count = 0
-        for prod in raw_products:
-            try:
-                discount_raw = str(prod.get("discount", "0")).replace('%', '')
-                payload = {
-                    "id": str(uuid.uuid5(self.NAMESPACE_ALI, str(prod.get("product_id")))),
-                    "titulo": prod.get("product_title", "Produto"),
-                    "url_produto": prod.get("promotion_link") or prod.get("product_detail_url") or "",
-                    "url_imagem": prod.get("product_main_image_url", ""),
-                    "preco_original": float(prod.get("target_original_price") or 0),
-                    "preco_desconto": float(prod.get("target_sale_price") or 0),
-                    "percentual_desconto": float(discount_raw),
-                    "enviado": False,
-                    "tentativas": 0,
-                    "product_rating": float(prod.get("evaluate_rate", 4.8)),
-                    "sales_volume": int(prod.get("volume", 50)),
-                    "seller_feedback_rate": float(prod.get("shop_review_rate", 0.95)),
-                    "atualizado_em": "now()"
-                }
-                self.supabase.table("ofertas").upsert(payload).execute()
-                inserted_count += 1
-            except Exception as e:
-                logger.error(f"Erro no upsert: {e}")
-        return inserted_count
+        # Adicione aqui sua lógica de sinalização (sign) conforme sua API atual
+        try:
+            resp = await self.http_client.get("/sync", params=params)
+            products = resp.json().get("aliexpress_affiliate_product_query_response", {}).get("resp_result", {}).get("result", {}).get("products", {}).get("product", [])
+            
+            for p in (products if isinstance(products, list) else [products] if products else []):
+                if self._is_valid(p.get("product_title", "")):
+                    payload = {
+                        "titulo": p["product_title"], "url_produto": p.get("promotion_link"),
+                        "preco_original": float(p.get("target_original_price", 0)),
+                        "preco_desconto": float(p.get("target_sale_price", 0)),
+                        "enviado": False
+                    }
+                    self.supabase.table("ofertas").upsert(payload).execute()
+        except Exception as e:
+            logger.error(f"Erro na busca: {e}")
 
     async def close(self):
         await self.http_client.aclose()
