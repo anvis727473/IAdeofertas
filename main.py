@@ -3,11 +3,6 @@ import logging
 import os
 from supabase import create_client
 
-from aiohttp import web
-async def handle(request): return web.Response(text="Bot is running")
-app = web.Application()
-app.add_routes([web.get('/', handle)])
-
 # Configuração de Logs
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] bot.main: %(message)s")
 logger = logging.getLogger("bot.main")
@@ -18,58 +13,62 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 async def enviar_para_telegram(produto):
-    """ Aqui entra a sua lógica de envio para o bot do Telegram """
-    logger.info(f"Enviando oferta: {produto['titulo']} - R$ {produto['preco_desconto']}")
+    """ Lógica de envio """
+    titulo = produto.get('titulo', 'Produto')
+    preco = produto.get('preco_desconto', 0)
+    logger.info(f"ENVIANDO OFERTA: {titulo} | R$ {preco}")
     
-    # Exemplo: Marcar como enviado no banco
-    supabase.table("ofertas").update({"enviado": True}).eq("id", produto['id']).execute()
+    # Atualiza no banco como enviado
+    try:
+        supabase.table("ofertas").update({"enviado": True}).eq("id", produto['id']).execute()
+    except Exception as e:
+        logger.error(f"Erro ao marcar como enviado: {e}")
 
-async def analisar_e_processar():
-    """ Loop principal de triagem e envio """
-    logger.info("Iniciando ciclo de triagem...")
+async def processar_lote():
+    """ Loop de triagem simplificado (sem filtros estatísticos proibitivos) """
+    logger.info("Iniciando ciclo de processamento...")
     
-    # Busca um lote maior para análise (50 produtos)
-    response = supabase.table("ofertas")\
-        .select("*")\
-        .eq("enviado", False)\
-        .lt("tentativas", 5)\
-        .order("sales_volume", desc=True)\
-        .limit(50)\
-        .execute()
-    
-    produtos = response.data
-    if not produtos:
-        logger.info("Nenhum produto novo para analisar.")
+    try:
+        # Busca 50 produtos não enviados
+        response = supabase.table("ofertas")\
+            .select("*")\
+            .eq("enviado", False)\
+            .lt("tentativas", 5)\
+            .order("sales_volume", desc=True)\
+            .limit(50)\
+            .execute()
+        
+        produtos = response.data
+    except Exception as e:
+        logger.error(f"Erro ao buscar produtos: {e}")
         return
 
-    logger.info(f"Analisando {len(produtos)} produtos...")
+    if not produtos:
+        logger.info("Nenhum produto novo na fila.")
+        return
 
     for item in produtos:
-        # LÓGICA DE FILTRO (Pode ajustar conforme necessário)
-        # Critério: Desconto > 10% OU alto volume de vendas
-        desconto = item.get('percentual_desconto', 0)
-        volume = item.get('sales_volume', 0)
+        desconto = float(item.get('percentual_desconto', 0))
+        volume = int(item.get('sales_volume', 0))
         
-        if desconto >= 10 or volume > 1000:
+        # FILTRO RELAXADO: Aceita se tiver desconto > 5% OU for muito popular (volume > 100)
+        if desconto >= 5 or volume > 100:
             await enviar_para_telegram(item)
         else:
-            # Caso não passe no filtro, incrementa tentativas para não reprocessar eternamente
-            nova_tentativa = item.get('tentativas', 0) + 1
-            supabase.table("ofertas")\
-                .update({"tentativas": nova_tentativa})\
-                .eq("id", item['id'])\
-                .execute()
-            logger.info(f"Produto {item['id']} retido no filtro (Desconto: {desconto}%).")
+            # Incrementa tentativa para não reprocessar o mesmo produto toda vez
+            try:
+                nova_tentativa = item.get('tentativas', 0) + 1
+                supabase.table("ofertas").update({"tentativas": nova_tentativa}).eq("id", item['id']).execute()
+            except:
+                pass
 
 async def main():
+    logger.info("Bot Sniper iniciado com sucesso.")
     while True:
-        try:
-            await analisar_e_processar()
-        except Exception as e:
-            logger.error(f"Erro no ciclo: {e}")
-        
-        # Intervalo entre rodadas de análise
-        await asyncio.sleep(60)
+        await processar_lote()
+        await asyncio.sleep(30) # Espera 30 segundos antes do próximo ciclo
 
 if __name__ == "__main__":
+    # Removemos qualquer necessidade de abrir porta HTTP, 
+    # pois isso deve rodar como 'Background Worker' no Render.
     asyncio.run(main())
