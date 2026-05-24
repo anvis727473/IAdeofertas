@@ -172,4 +172,6 @@ class AliExpressSearchEngine:
         return inserted_successful
 
     async def close(self):
-        """ Fecha o
+        """ Fecha o cliente HTTP de forma limpa para evitar vazamento de memória """
+        await self.http_client.aclose()
+        logger.info("Conexões do Motor de Busca finalizadas com sucesso.")
