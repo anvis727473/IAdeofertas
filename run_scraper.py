@@ -24,13 +24,25 @@ SCRAPE_INTERVAL = int(os.environ.get("SCRAPE_INTERVAL", "600"))
 
 # Lista de palavras-chave para garimpar (pode alterar conforme o seu nicho)
 KEYWORDS = [
-    'smartwatch', 
-    'fone bluetooth', 
-    'teclado mecanico', 
-    'acessorios gamer', 
-    'carregador portatil',
-    'projetor',
-    'lampada inteligente'
+    # Periféricos Gaming
+    "mechanical keyboard", "gaming mouse", "rgb gaming mouse pad", "gaming headset", 
+    "wireless gaming controller", "gaming microphone",
+    
+    # Armazenamento e Hardware
+    "ssd nvme 1tb", "external ssd", "usb flash drive 256gb", "ram ddr4 3200", 
+    "ram ddr5", "pc case fan rgb", "cpu cooler",
+    
+    # Conectividade e Acessórios
+    "usb c hub", "docking station", "wifi 6 router", "wireless wifi adapter", 
+    "bluetooth 5.3 adapter", "ethernet cable cat8", "usb c to hdmi adapter",
+    
+    # Home Office e Produtividade
+    "laptop stand", "vertical mouse", "ergonomic keyboard", "webcam 1080p", 
+    "monitor light bar", "monitor arm mount", "desktop microphone",
+    
+    # Gadgets Tech
+    "power bank 20000mah", "portable monitor", "usb c charger 65w", 
+    "digital drawing tablet", "smart watch fitness"
 ]
 
 def run_dummy_server():
