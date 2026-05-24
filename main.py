@@ -3,6 +3,11 @@ import logging
 import os
 from supabase import create_client
 
+from aiohttp import web
+async def handle(request): return web.Response(text="Bot is running")
+app = web.Application()
+app.add_routes([web.get('/', handle)])
+
 # Configuração de Logs
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] bot.main: %(message)s")
 logger = logging.getLogger("bot.main")
