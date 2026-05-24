@@ -37,7 +37,7 @@ class AliExpressSearchEngine:
     async def fetch_keyword_page(self, keyword: str, page_no: int) -> List[Dict[str, Any]]:
         params = {
             "app_key": self.app_key,
-            "fields": "product_id,product_title,product_detail_url,product_main_image_url,target_sale_price,target_original_price,discount,evaluate_rate,shop_review_rate,volume",
+            "fields": "product_id,product_title,product_detail_url,product_main_image_,target_sale_price,target_original_price,discount,evaluate_rate,shop_review_rate,volume",
             "keyword": keyword,
             "method": "aliexpress.affiliate.product.query",
             "page_no": str(page_no),
@@ -81,7 +81,7 @@ class AliExpressSearchEngine:
                 payload = {
                     "id": str(uuid.uuid5(self.NAMESPACE_ALI, str(prod.get("product_id")))),
                     "titulo": prod.get("product_title", "Produto"),
-                    "url_produto": prod.get("product_detail_url", ""),
+                    "url_produto": prod.get("promotion_link") or prod.get("product_detail_url") or "",
                     "url_imagem": prod.get("product_main_image_url", ""),
                     "preco_original": float(prod.get("target_original_price") or 0),
                     "preco_desconto": float(prod.get("target_sale_price") or 0),
