@@ -1,74 +1,58 @@
 import asyncio
 import logging
 import os
+import telegram
 from supabase import create_client
 
-# Configuração de Logs
+# Configuração básica de log
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] bot.main: %(message)s")
 logger = logging.getLogger("bot.main")
 
-# Inicialização Supabase
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+# Inicialização
+supabase = create_client(os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY"))
+bot = telegram.Bot(token=os.environ.get("TELEGRAM_TOKEN"))
+CHAT_ID = os.environ.get("CHAT_ID")
 
 async def enviar_para_telegram(produto):
-    """ Lógica de envio """
-    titulo = produto.get('titulo', 'Produto')
-    preco = produto.get('preco_desconto', 0)
-    logger.info(f"ENVIANDO OFERTA: {titulo} | R$ {preco}")
+    """ Envio direto para o Telegram sem bloqueios estatísticos """
+    mensagem = (
+        f"🔥 *Oportunidade Tech*\n\n"
+        f"📦 {produto['titulo']}\n"
+        f"💰 Preço: R$ {produto['preco_desconto']:.2f}\n\n"
+        f"👉 [COMPRAR NO ALIEXPRESS]({produto['url_produto']})"
+    )
     
-    # Atualiza no banco como enviado
     try:
+        await bot.send_message(chat_id=CHAT_ID, text=mensagem, parse_mode='Markdown')
+        # Marca como enviado no banco
         supabase.table("ofertas").update({"enviado": True}).eq("id", produto['id']).execute()
+        logger.info(f"✅ ENVIADO COM SUCESSO: {produto['titulo']}")
     except Exception as e:
-        logger.error(f"Erro ao marcar como enviado: {e}")
+        logger.error(f"❌ ERRO AO ENVIAR NO TELEGRAM: {e}")
 
 async def processar_lote():
-    """ Loop de triagem simplificado (sem filtros estatísticos proibitivos) """
-    logger.info("Iniciando ciclo de processamento...")
+    # Palavras-chave de TI para filtrar o que importa
+    IT_TERMS = ["keyboard", "mouse", "ssd", "ram", "monitor", "router", "hub", "pc", "gaming", "usb", "headset", "graphics"]
     
-    try:
-        # Busca 50 produtos não enviados
-        response = supabase.table("ofertas")\
-            .select("*")\
-            .eq("enviado", False)\
-            .lt("tentativas", 5)\
-            .order("sales_volume", desc=True)\
-            .limit(50)\
-            .execute()
+    # Busca ofertas não enviadas (Removida a limitação do filtro estatístico)
+    response = supabase.table("ofertas").select("*").eq("enviado", False).limit(10).execute()
+    
+    for item in response.data:
+        titulo = item.get('titulo', '').lower()
         
-        produtos = response.data
-    except Exception as e:
-        logger.error(f"Erro ao buscar produtos: {e}")
-        return
-
-    if not produtos:
-        logger.info("Nenhum produto novo na fila.")
-        return
-
-    for item in produtos:
-        desconto = float(item.get('percentual_desconto', 0))
-        volume = int(item.get('sales_volume', 0))
-        
-        # FILTRO RELAXADO: Aceita se tiver desconto > 5% OU for muito popular (volume > 100)
-        if desconto >= 5 or volume > 100:
+        # Só envia se for item de informática
+        if any(term in titulo for term in IT_TERMS):
             await enviar_para_telegram(item)
         else:
-            # Incrementa tentativa para não reprocessar o mesmo produto toda vez
-            try:
-                nova_tentativa = item.get('tentativas', 0) + 1
-                supabase.table("ofertas").update({"tentativas": nova_tentativa}).eq("id", item['id']).execute()
-            except:
-                pass
+            # Se não é TI, marca como enviado para limpar a fila
+            supabase.table("ofertas").update({"enviado": True}).eq("id", item['id']).execute()
+            logger.info(f"⚠️ Ignorado (Não é TI): {item['titulo'][:50]}...")
 
 async def main():
-    logger.info("Bot Sniper iniciado com sucesso.")
+    logger.info("Bot de Ofertas Tech Iniciado.")
     while True:
         await processar_lote()
-        await asyncio.sleep(30) # Espera 30 segundos antes do próximo ciclo
+        await asyncio.sleep(30) # Espera 30 segundos antes de buscar novos produtos
 
 if __name__ == "__main__":
-    # Removemos qualquer necessidade de abrir porta HTTP, 
-    # pois isso deve rodar como 'Background Worker' no Render.
     asyncio.run(main())
