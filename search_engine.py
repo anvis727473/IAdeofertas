@@ -31,33 +31,44 @@ class AliExpressSearchEngine:
         ]
 
     async def fetch_keyword_page(self, keyword: str, page_no: int) -> List[Dict[str, Any]]:
-        """ Busca produtos por palavras-chave com filtros de localização """
+        # O AliExpress API muitas vezes falha se os parâmetros não estiverem em ordem alfabética 
+        # ou se faltar a definição de 'fields'.
         params = {
-            "method": "aliexpress.affiliate.product.query",
             "app_key": self.app_key,
-            "sign_method": "md5",
+            "fields": "product_id,product_title,product_detail_url,product_main_image_url,target_sale_price,target_original_price,discount,evaluate_rate,shop_review_rate,volume",
             "keyword": keyword,
+            "method": "aliexpress.affiliate.product.query",
             "page_no": str(page_no),
             "page_size": "20",
-            "target_currency": "BRL",
-            "target_language": "PT",
-            "ship_to_country": "BR",
-            "sort": "VOLUME_HIGH"
+            "sign_method": "md5",
+            "sort": "VOLUME_DESC" # Alterado para DESC
         }
-
+        
+        # Opcional: Remova o ship_to_country e target_currency se os resultados continuarem zerados.
+        # Muitas contas de afiliado padrão só retornam resultados globais.
+        
         async with self.semaphore:
             try:
+                # Usamos um timeout mais curto para não travar
                 response = await self.http_client.get("/sync", params=params)
+                
                 if response.status_code != 200:
+                    logger.error(f"Erro {response.status_code} na API: {response.text}")
                     return []
                 
                 data = response.json()
-                query_result = data.get("aliexpress_affiliate_product_query_response", {})
-                products = query_result.get("products", {}).get("product", [])
+                
+                # Log agressivo para debug (só por um ciclo para vermos o que vem de volta)
+                logger.info(f"DEBUG RESPONSE: {data}") 
+                
+                # Caminho padrão da resposta
+                resp = data.get("aliexpress_affiliate_product_query_response", {})
+                result = resp.get("resp_result", {}).get("result", {})
+                products = result.get("products", {}).get("product", [])
                 
                 return products if isinstance(products, list) else [products] if products else []
             except Exception as e:
-                logger.error(f"Erro na busca por '{keyword}': {e}")
+                logger.error(f"Erro na busca: {e}")
                 return []
 
     async def run_parallel_discovery(self, keywords: List[str], target_pages: int = 2) -> int:
