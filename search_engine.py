@@ -24,10 +24,7 @@ class AliExpressSearchEngine:
         )
 
     def _generate_sign(self, params: Dict[str, Any]) -> str:
-        """ Gera a assinatura MD5 seguindo a ordenação alfabética estrita """
-        # Ordena as chaves
         sorted_keys = sorted(params.keys())
-        # Concatena: Secret + Chave1 + Valor1 + ... + ChaveN + ValorN + Secret
         sign_str = self.app_secret
         for key in sorted_keys:
             sign_str += f"{key}{params[key]}"
@@ -37,17 +34,15 @@ class AliExpressSearchEngine:
     async def fetch_keyword_page(self, keyword: str, page_no: int) -> List[Dict[str, Any]]:
         params = {
             "app_key": self.app_key,
-            "fields": "product_id,product_title,product_detail_url,product_main_image_,target_sale_price,target_original_price,discount,evaluate_rate,shop_review_rate,volume",
+            "fields": "product_id,product_title,product_detail_url,product_main_image_url,target_sale_price,target_original_price,discount,evaluate_rate,shop_review_rate,volume,promotion_link",
             "keyword": keyword,
             "method": "aliexpress.affiliate.product.query",
             "page_no": str(page_no),
-            "page_size": "20",
+            "page_size": "50",  # Lote aumentado
             "sign_method": "md5",
             "sort": "VOLUME_DESC",
             "timestamp": str(int(time.time() * 1000))
         }
-        
-        # Gera a assinatura após definir todos os parâmetros
         params["sign"] = self._generate_sign(params)
         
         async with self.semaphore:
@@ -55,17 +50,12 @@ class AliExpressSearchEngine:
                 response = await self.http_client.get("/sync", params=params)
                 if response.status_code != 200: return []
                 data = response.json()
-                
-                if "error_response" in data:
-                    logger.error(f"Erro API ({keyword}): {data['error_response'].get('msg')}")
-                    return []
+                if "error_response" in data: return []
                 
                 resp = data.get("aliexpress_affiliate_product_query_response", {})
                 products = resp.get("resp_result", {}).get("result", {}).get("products", {}).get("product", [])
                 return products if isinstance(products, list) else [products] if products else []
-            except Exception as e:
-                logger.error(f"Exceção ao buscar {keyword}: {e}")
-                return []
+            except Exception: return []
 
     async def run_parallel_discovery(self, keywords: List[str], target_pages: int = 1) -> int:
         tasks = [self.fetch_keyword_page(kw, page) for kw in keywords for page in range(1, target_pages + 1)]
@@ -75,9 +65,7 @@ class AliExpressSearchEngine:
         inserted_count = 0
         for prod in raw_products:
             try:
-                # Tratamento robusto para evitar erro de string -> float
                 discount_raw = str(prod.get("discount", "0")).replace('%', '')
-                
                 payload = {
                     "id": str(uuid.uuid5(self.NAMESPACE_ALI, str(prod.get("product_id")))),
                     "titulo": prod.get("product_title", "Produto"),
