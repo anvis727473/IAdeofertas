@@ -19,7 +19,7 @@ class AliExpressSearchEngine:
         self.supabase = get_client()
         self.app_key = api_key
         self.app_secret = os.environ.get("ALI_APP_SECRET", "")
-        self.semaphore = asyncio.Semaphore(max_concurrent_requests)
+        self.semaphore = asyncio.Semaphore(int(max_concurrent_requests))
         self.http_client = httpx.AsyncClient(base_url="https://api-sg.aliexpress.com", http2=True, timeout=15.0)
 
     def _generate_sign(self, params: Dict[str, Any]) -> str:
