@@ -4,117 +4,137 @@ import logging
 import sys
 from aiohttp import web
 import telegram
-from supabase import create_client
 
-# Configuração de Logs Corporativa
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-logger = logging.getLogger("bot.production")
+# Importações dos seus módulos internos
+import database
+from search_engine import AliExpressSearchEngine
 
-# Inicialização de Clientes Seguros
-try:
-    supabase = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
-    bot = telegram.Bot(token=os.environ["TELEGRAM_TOKEN"])
-    CHAT_ID = os.environ["CHAT_ID"]
-except KeyError as e:
-    logger.critical(f"Variável de ambiente ausente no ecossistema: {e}")
-    sys.exit(1)
+# Configuração de Logging unificada
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    stream=sys.stdout
+)
+logger = logging.getLogger("bot.unified")
 
-class OfferProcessor:
-    def __init__(self):
-        # Tamanho do lote expansível via Variável de Ambiente para evitar travamentos
-        self.batch_size = int(os.environ.get("BATCH_SIZE", "15"))
-        self.poll_interval = int(os.environ.get("POLL_INTERVAL", "60"))
+# --- Configurações e Inicialização ---
+SCRAPE_INTERVAL = int(os.environ.get("SCRAPE_INTERVAL", "600"))
+CHAT_ID = os.environ.get("CHAT_ID")
 
-    def _format_html(self, item) -> str:
-        """Formatação Premium HTML Limpa e Escapada contra quebras de sintaxe."""
-        titulo = item['titulo'].replace("<", "&lt;").replace(">", "&gt;")
-        preco_orig = float(item.get('preco_original') or 0)
-        preco_desc = float(item.get('preco_desconto') or 0)
-        cupom = item.get('cupom') or "N/A"
+# Inicializa as conexões usando o seu módulo database.py
+supabase = database.get_client()
+bot = telegram.Bot(token=os.environ.get("TELEGRAM_TOKEN"))
+
+# Matriz de Nichos (Trazida do seu antigo run_scraper.py)
+NICHOS = {
+    "PERIFERICOS_GAMING": [
+        "mechanical keyboard wireless", "gaming mouse rgb", "mousepad gaming large", 
+        "gaming headset 7.1", "wireless controller pc", "streaming microphone usb",
+        "keycaps mechanical keyboard", "coiled cable keyboard"
+    ],
+    "HARDWARE_E_UPGRADE": [
+        "ssd nvme 1tb", "ssd sata 1tb", "external ssd portable", "ram ddr4 16gb", 
+        "ram ddr5 desktop", "cpu cooler argb", "pc case fans pack", "thermal paste high performance"
+    ],
+    "PRODUTIVIDADE_HOME_OFFICE": [
+        "ergonomic vertical mouse", "usb c hub multi port", "monitor light bar", "laptop stand aluminum"
+    ]
+}
+KEYWORDS = [kw for nicho in NICHOS.values() for kw in nicho]
+
+
+# =============================================================================
+# 1. LÓGICA DO BOT (ENVIO PARA O TELEGRAM)
+# =============================================================================
+async def processar_lote():
+    try:
+        # Busca 5 ofertas pendentes no Supabase
+        response = supabase.table("ofertas").select("*").eq("enviado", False).limit(5).execute()
         
-        return (
-            f"🔥 <b>{titulo[:100]}</b>\n\n"
-            f"💰 De: <s>R$ {preco_orig:.2f}</s>\n"
-            f"🏷 Por: <code>R$ {preco_desc:.2f}</code>\n"
-            f"🎟 Cupom: <code>{cupom}</code>\n\n"
-            f"👉 <a href='{item['url_produto']}'>CLIQUE AQUI PARA COMPRAR</a>"
-        )
-
-    async def execute_batch_polling(self):
-        """Executa a busca e processamento isolando o I/O síncrono da thread principal."""
-        # Thread Offloading: Evita o congelamento do Event Loop (SPOF mitigado)
-        def fetch_data():
-            return supabase.table("ofertas").select("*")\
-                .eq("enviado", False)\
-                .order("prioridade", desc=True)\
-                .limit(self.batch_size).execute()
-
-        response = await asyncio.to_thread(fetch_data)
-        items = response.data
-        
-        if not items:
-            return
-
-        logger.info(f"Lote capturado com {len(items)} candidatos pendentes.")
-
-        for item in items:
-            preco_orig = float(item.get('preco_original') or 0)
-            preco_desc = float(item.get('preco_desconto') or 0)
-            cupom = item.get('cupom')
-
-            # Unificação Estrita da Regra de Negócio (Filtro Premium)
-            if cupom and (preco_desc < preco_orig * 0.9):
-                try:
-                    mensagem_html = self._format_html(item)
-                    await bot.send_message(chat_id=CHAT_ID, text=mensagem_html, parse_mode='HTML')
-                    
-                    # Atualiza estado para Enviado com sucesso
-                    await asyncio.to_thread(
-                        lambda: supabase.table("ofertas").update({"enviado": True}).eq("id", item['id']).execute()
-                    )
-                    logger.info(f"✅ DESPACHADO: {item['titulo'][:30]}")
-                except Exception as e:
-                    logger.error(f"Falha de rede ou barramento ao enviar item {item['id']}: {e}")
-            else:
-                # Descarta o item direto no banco para limpar a fila de forma eficiente
-                await asyncio.to_thread(
-                    lambda: supabase.table("ofertas").update({"enviado": True}).eq("id", item['id']).execute()
-                )
-                logger.info(f"🗑️ DESCARTADO (Sem margem/cupom): {item['titulo'][:30]}")
+        for item in response.data:
+            mensagem = (
+                f"🔥 *Nova Oferta:* {item['titulo']}\n"
+                f"💰 Preço: R$ {item['preco_desconto']:.2f}\n\n"
+                f"👉 [COMPRAR NO ALIEXPRESS]({item['url_produto']})"
+            )
             
-            # Controle Anti-Flood do Telegram regulado em 2 segundos por post real
-            await asyncio.sleep(2.0)
+            # Envia para o canal
+            await bot.send_message(chat_id=CHAT_ID, text=mensagem, parse_mode='Markdown')
+            
+            # Marca como enviado no banco
+            supabase.table("ofertas").update({"enviado": True}).eq("id", item['id']).execute()
+            logger.info(f"✅ TELEGRAM: Enviado com sucesso -> {item['titulo'][:40]}...")
+            
+            # Anti-flood da API do Telegram
+            await asyncio.sleep(1) 
+            
+    except Exception as e:
+        logger.error(f"Erro no processamento de envio: {e}")
 
-async def daemon_loop(processor: OfferProcessor):
-    """Loop infinito controlado e protegido contra quebras de execução."""
-    logger.info("Iniciando Daemon de sincronismo de ofertas...")
+async def bot_loop():
+    logger.info("Loop do Telegram Bot iniciado (Frequência: 60s).")
     while True:
-        try:
-            await processor.execute_batch_polling()
-        except Exception as e:
-            logger.error(f"Erro inesperado no ciclo do Daemon: {e}", exc_info=True)
-        
-        # Garante o repouso real configurado (Padrão: 60 segundos)
-        await asyncio.sleep(processor.poll_interval)
+        await processar_lote()
+        await asyncio.sleep(60)
 
-# --- Servidor HTTP Assíncrono (Contrato de Liveness do Render) ---
-async def handle_health_check(request):
-    return web.Response(text="SERVER_OK", content_type="text/plain")
 
-async def start_web_server():
+# =============================================================================
+# 2. LÓGICA DO BUSCADOR (SCRAPER DO ALIEXPRESS)
+# =============================================================================
+async def scraper_loop():
+    logger.info("Loop do Buscador AliExpress iniciado.")
+    try:
+        api_key = os.environ["ALI_API_KEY"]
+    except KeyError:
+        logger.critical("Erro: Variável de ambiente 'ALI_API_KEY' não configurada. O Buscador não iniciará.")
+        return
+
+    # Inicializa o motor de busca do seu search_engine.py
+    engine = AliExpressSearchEngine(supabase, api_key)
+
+    try:
+        while True:
+            logger.info(f"Buscador: Iniciando varredura de {len(KEYWORDS)} palavras-chave...")
+            
+            # Executa a busca mapeando 2 páginas por termo
+            inserted_count = await engine.run_parallel_discovery(KEYWORDS, target_pages=2)
+            
+            logger.info(f"Buscador: Varredura concluída. {inserted_count} novas ofertas salvas.")
+            logger.info(f"Buscador: Próxima varredura em {SCRAPE_INTERVAL} segundos.")
+            
+            await asyncio.sleep(SCRAPE_INTERVAL)
+    except Exception as e:
+        logger.exception(f"Erro crítico no loop do buscador: {e}")
+    finally:
+        await engine.close()
+
+
+# =============================================================================
+# 3. SERVIDOR WEB (EVITAR TIMEOUT NO RENDER) E ORQUESTRADOR
+# =============================================================================
+async def handle(request):
+    return web.Response(text="Bot Unificado Online: Buscador e Envio operando concorrentemente.")
+
+async def main():
+    # Configura e inicia o servidor web na porta correta
     app = web.Application()
-    app.router.add_get('/', handle_health_check)
+    app.router.add_get('/', handle)
     runner = web.AppRunner(app)
     await runner.setup()
+    
     port = int(os.environ.get("PORT", 8080))
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
-    logger.info(f"Servidor HTTP Ativo com sucesso na porta {port}")
+    logger.info(f"Servidor Web de prontidão na porta {port}")
+
+    # O "pulo do gato": Executa as duas tarefas ao mesmo tempo infinitamente
+    await asyncio.gather(
+        bot_loop(),
+        scraper_loop()
+    )
 
 if __name__ == "__main__":
-    processor = OfferProcessor()
-    
-    # Orquestração limpa de múltiplas corrotinas no mesmo Loop de Eventos
-    loop = asyncio.get_event_loop()
-    loop.create_task(start_web_server())
-    loop.run_until_complete(daemon_loop(processor))
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Aplicação encerrada pelo usuário.")
